@@ -1,0 +1,44 @@
+name: Release
+
+# Build a Release and publish it as a GitHub Release whenever a version tag is pushed.
+# Tag and push to trigger, for example:
+#   git tag v1.0.0
+#   git push origin v1.0.0
+
+on:
+  push:
+    tags: [ 'v*' ]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Build (Release)
+        run: dotnet build ATENtion.slnx -c Release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $out = "src/ATENtion.App/bin/Release/net48"
+          $zip = "ATENtion-${{ github.ref_name }}-win.zip"
+          $files = Get-ChildItem $out -File | Where-Object { $_.Extension -ne '.pdb' }
+          Compress-Archive -Path $files.FullName -DestinationPath $zip -Force
+          "ZIP=$zip" >> $env:GITHUB_ENV
+
+      - name: Create GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create ${{ github.ref_name }} $env:ZIP --title ${{ github.ref_name }} --generate-notes

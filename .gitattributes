@@ -1,0 +1,20 @@
+# Normalise line endings for text files; Git decides per-file.
+* text=auto
+
+# Source and project files are text.
+*.cs        text
+*.xaml      text
+*.csproj    text
+*.slnx      text
+*.md        text
+*.gitignore text
+*.gitattributes text
+
+# Binary assets must never be line-ending converted.
+*.pfx binary
+*.ico binary
+*.png binary
+*.jpg binary
+*.gif binary
+*.dll binary
+*.exe binary

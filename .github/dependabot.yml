@@ -1,0 +1,14 @@
+version: 2
+
+updates:
+  # Keep the GitHub Actions used by the CI and release workflows up to date.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # Keep NuGet packages up to date (the test project's xUnit and test SDK).
+  - package-ecosystem: "nuget"
+    directory: "/"
+    schedule:
+      interval: "weekly"

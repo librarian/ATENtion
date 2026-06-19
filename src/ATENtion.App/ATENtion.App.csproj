@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <LangVersion>latest</LangVersion>
+    <!-- Reproducible builds: same source -> same binary (stable PDB paths, no embedded timestamps). -->
+    <Deterministic>true</Deterministic>
+    <!-- Nullable reference types stay OFF deliberately: the code uses explicit null checks + defensive
+         try/catch throughout, and enabling it would cascade warnings across the large WPF code-behind
+         for no runtime benefit. Revisit per-file with `#nullable enable` on new Core code if desired. -->
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>ATENtion.App</RootNamespace>
+    <AssemblyName>ATENtion</AssemblyName>
+    <ApplicationIcon>atention.ico</ApplicationIcon>
+    <Version>1.0.0</Version>
+    <Product>ATENtion</Product>
+    <Description>Native console (KVM/virtual media) client for Supermicro/ATEN BMCs.</Description>
+    <Authors>Thomas Jones</Authors>
+    <Company>Thomas Jones</Company>
+    <Copyright>Copyright © 2026 Thomas Jones</Copyright>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ATENtion.Core\ATENtion.Core.csproj" />
+    <!-- ProtectedData (DPAPI) for storing the saved BMC password encrypted per-Windows-user. -->
+    <Reference Include="System.Security" />
+    <!-- ApplicationSettingsBase / LocalFileSettingsProvider - user.config-backed settings store. -->
+    <Reference Include="System.Configuration" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Supermicro's generic iKVM client certificate (for mutual TLS to the BMC KVM port).
+         Baked into the binary so no loose file is needed; a client.pfx placed next to the exe
+         still overrides it (e.g. a renewed cert). It is the same public vendor cert shipped in
+         every iKVM jar (CN=IPMI, O=Super Micro Computer) - not per-device. -->
+    <EmbeddedResource Include="client.pfx">
+      <LogicalName>client.pfx</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- App icon (window/taskbar) + the larger artwork shown in the About box. -->
+    <Resource Include="atention.ico" />
+    <Resource Include="atention.png" />
+  </ItemGroup>
+
+</Project>

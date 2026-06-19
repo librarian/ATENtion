@@ -1,0 +1,41 @@
+name: CI
+
+# Build and test on every push and pull request to main. The job runs on Windows
+# because the app targets .NET Framework 4.8 and WPF, which do not build on Linux.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      # A recent SDK is required to build the .slnx solution format.
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Build (Release)
+        run: dotnet build ATENtion.slnx -c Release
+
+      - name: Test
+        run: dotnet test ATENtion.slnx -c Release --no-build
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ATENtion
+          path: |
+            src/ATENtion.App/bin/Release/net48/ATENtion.exe
+            src/ATENtion.App/bin/Release/net48/ATENtion.Core.dll
+            src/ATENtion.App/bin/Release/net48/ATENtion.exe.config
+          if-no-files-found: error

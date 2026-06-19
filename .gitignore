@@ -1,0 +1,34 @@
+# Build output and intermediate files
+bin/
+obj/
+[Bb]uild/
+[Oo]ut/
+
+# Visual Studio / Rider / VS Code
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.userprefs
+
+# .NET / NuGet
+project.assets.json
+*.dgspec.json
+*.nuget.props
+*.nuget.targets
+*.nupkg
+*.snupkg
+
+# Generated user settings (the app writes these under %LOCALAPPDATA%, but ignore any local copy)
+user.config
+
+# Runtime logs. These can contain a BMC IP, hostname, and a session token, so never commit them.
+*.log
+
+# OS cruft
+Thumbs.db
+desktop.ini
+.DS_Store
