@@ -1,11 +1,13 @@
 # ASPEED native decoder
 
 This directory contains the ASPEED Technology reference decoder from
-`AspeedTech-BMC/aspeed_codec`, adapted only to:
+`AspeedTech-BMC/aspeed_codec`, adapted to:
 
 - export a small native Windows ABI (`aspeed_init`, `aspeed_decode`);
 - compile without Emscripten; and
-- set the alpha byte of decoded BGRA pixels to opaque.
+- set the alpha byte of decoded BGRA pixels to opaque;
+- restore the ASPEED VQ block decoding used by YUV444 Enhanced Text streams; and
+- reject truncated or unknown blocks without reading beyond the input buffer.
 
 The upstream source files and these modifications are licensed under the
 Mozilla Public License 2.0. See `LICENSE`. The package metadata in the upstream

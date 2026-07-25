@@ -27,6 +27,12 @@
 #define FRAME_END_CODE 0x09
 #define JPEG_PASS2_CODE 0x02
 #define JPEG_SKIP_PASS2_CODE 0x0A
+#define VQ_NO_SKIP_1_COLOR_CODE 0x05
+#define VQ_SKIP_1_COLOR_CODE 0x0D
+#define VQ_NO_SKIP_2_COLOR_CODE 0x06
+#define VQ_SKIP_2_COLOR_CODE 0x0E
+#define VQ_NO_SKIP_4_COLOR_CODE 0x07
+#define VQ_SKIP_4_COLOR_CODE 0x0F
 
 // block length
 #define BLOCK_AST2100_START_LENGTH 0x04
@@ -42,6 +48,11 @@ struct YUV {
     BYTE Y;
     BYTE U;
     BYTE V;
+};
+struct ColorCache {
+    DWORD color[4];
+    BYTE index[4];
+    BYTE bitmap_bits;
 };
 
 static int32_t QT[4][64]; // quantization tables, no more than 4 quantization tables (QT[0..3])
@@ -166,7 +177,9 @@ static void LoadHuffmanTable(Huffman_table* HT, BYTE* nrcode, BYTE* value, WORD*
     i = 2;
 
     for (code_index = 1; code_index < 65536; code_index++) {
-        if (code_index >= Huff_code[i])
+        /* The final 0xffff entry is a sentinel as well as a valid lookup boundary.
+         * Advancing past it reads beyond the compact threshold table. */
+        if (Huff_code[i] != 0xffff && code_index >= Huff_code[i])
             i += 2;
         HT->Len[code_index] = (unsigned char)Huff_code[i + 1];
     }
@@ -747,7 +760,7 @@ static void InverseDCT(short* coef, BYTE* data, BYTE nBlock)
         if (inptr[DCTSIZE * 1] == 0 && inptr[DCTSIZE * 2] == 0 &&
             inptr[DCTSIZE * 3] == 0 && inptr[DCTSIZE * 4] == 0 &&
             inptr[DCTSIZE * 5] == 0 && inptr[DCTSIZE * 6] == 0 &&
-            inptr[DCTSIZE * 7]) {
+            inptr[DCTSIZE * 7] == 0) {
             wsptr[DCTSIZE * 0] = wsptr[DCTSIZE * 1] = wsptr[DCTSIZE * 2] =
                                  wsptr[DCTSIZE * 3] = wsptr[DCTSIZE * 4] =
                                  wsptr[DCTSIZE * 5] = wsptr[DCTSIZE * 6] =
@@ -974,9 +987,48 @@ static void UpdateXY(int *mbx, int *mby)
     *mby = (cur_data & 0x0FF000) >> 12;
 }
 
+static void DecodeVqColors(struct ColorCache *vq, BYTE count)
+{
+    BYTE i;
+    vq->bitmap_bits = count == 1 ? 0 : (count == 2 ? 1 : 2);
+    for (i = 0; i < count; i++) {
+        BYTE index = (BYTE)((cur_data >> 29) & 0x03);
+        vq->index[i] = index;
+        if (((cur_data >> 31) & 0x01) == 0) {
+            SkipBits(3);
+        } else {
+            vq->color[index] = (cur_data >> 5) & 0x00ffffff;
+            SkipBits(27);
+        }
+    }
+}
+
+static void DecompressVq(int mbx, int mby, BYTE *out_buf, struct ColorCache *vq)
+{
+    BYTE yuv[192];
+    BYTE *p = yuv;
+    int i;
+    for (i = 0; i < 64; i++) {
+        int data = vq->bitmap_bits == 0 ? 0 : ShowBits(vq->bitmap_bits);
+        DWORD color = vq->color[vq->index[data]];
+        p[0] = (BYTE)((color >> 16) & 0xff);
+        p[64] = (BYTE)((color >> 8) & 0xff);
+        p[128] = (BYTE)(color & 0xff);
+        p++;
+        if (vq->bitmap_bits != 0)
+            SkipBits(vq->bitmap_bits);
+    }
+    YUVToRGB(mbx, mby, yuv, yuv_buf, out_buf);
+}
+
 static void DecodeBuffer(int len, BYTE *out_buf)
 {
     int mbx = 0, mby = 0;
+    struct ColorCache vq = {
+        { 0x008080, 0xff8080, 0x808080, 0xc08080 },
+        { 0, 1, 2, 3 },
+        0
+    };
 
     do {
         switch (((cur_data >> 28) & (int32_t)BLOCK_HEADER_MASK)) {
@@ -1011,8 +1063,39 @@ static void DecodeBuffer(int len, BYTE *out_buf)
             DecompressPASS2(mbx, mby, out_buf, 2);
             MoveBlockIndex(&mbx, &mby);
             break;
+        case VQ_NO_SKIP_1_COLOR_CODE:
+        case VQ_NO_SKIP_2_COLOR_CODE:
+        case VQ_NO_SKIP_4_COLOR_CODE: {
+            BYTE count = (BYTE)(1u << (((cur_data >> 28) & BLOCK_HEADER_MASK) -
+                                      VQ_NO_SKIP_1_COLOR_CODE));
+            SkipBits(BLOCK_AST2100_START_LENGTH);
+            DecodeVqColors(&vq, count);
+            DecompressVq(mbx, mby, out_buf, &vq);
+            MoveBlockIndex(&mbx, &mby);
+            break;
         }
-    } while (in_buf_index <= len);
+        case VQ_SKIP_1_COLOR_CODE:
+        case VQ_SKIP_2_COLOR_CODE:
+        case VQ_SKIP_4_COLOR_CODE: {
+            BYTE count = (BYTE)(1u << (((cur_data >> 28) & BLOCK_HEADER_MASK) -
+                                      VQ_SKIP_1_COLOR_CODE));
+            UpdateXY(&mbx, &mby);
+            SkipBits(BLOCK_AST2100_SKIP_LENGTH);
+            DecodeVqColors(&vq, count);
+            DecompressVq(mbx, mby, out_buf, &vq);
+            MoveBlockIndex(&mbx, &mby);
+            break;
+        }
+        default:
+            /* An unknown block prefix cannot be skipped safely. Stop instead of spinning
+             * forever on the same four bits when a packet is malformed or misframed. */
+#ifdef ASPEED_DEBUG
+            fprintf(stderr, "unknown block prefix 0x%x at word %u\n",
+                    (unsigned)((cur_data >> 28) & BLOCK_HEADER_MASK), in_buf_index);
+#endif
+            return;
+        }
+    } while (in_buf_index <= (uint32_t)(len / (int)sizeof(*in_buf)));
 }
 
 ASPEED_EXPORT void aspeed_init(void)

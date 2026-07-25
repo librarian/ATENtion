@@ -51,6 +51,7 @@ X11 generations should work, but they are presently untested.
 - Optional diagnostic logging, off by default.
 - ASPEED AST2400/AST2500 modified-JPEG video (`RFB encoding 0x57`), including
   differential updates.
+- Enhanced Text Mode (YUV444) at maximum image quality for crisp coloured console text.
 - A command-line screenshot client for unattended diagnostics.
 
 ## Requirements

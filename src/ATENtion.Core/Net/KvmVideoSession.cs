@@ -134,6 +134,12 @@ namespace ATENtion.Core.Net
         /// <summary>BMC mouse mode sent at startup: 1=Absolute, 2=Relative(NORMAL), 3=Single.</summary>
         public byte MouseMode { get; set; } = 1;
 
+        /// <summary>ATEN image-quality level sent at startup (0=lowest, 11=highest).</summary>
+        public byte ImageQuality { get; set; } = ScreenInfoRequest.MaximumQuality;
+
+        /// <summary>ATEN chroma mode sent at startup. 444 enables Enhanced Text Mode; 422 is Normal.</summary>
+        public ushort ImageMode { get; set; } = ScreenInfoRequest.EnhancedTextMode;
+
         /// <summary>Total frames decoded (FramebufferUpdates that produced pixels).</summary>
         public long FramesDecoded { get; private set; }
         /// <summary>Total video payload bytes received (for a bandwidth readout).</summary>
@@ -339,16 +345,18 @@ namespace ATENtion.Core.Net
             int count = 0;
             try
             {
-                // Replicate the native DecodeThread startup wire sequence exactly:
-                //   updateInfo  -> [0x37]                 (FUN_180011a70, bare byte, once)
+                // Replicate the vendor viewer's startup wire sequence:
+                //   updateInfo -> [0x37], changeScreenInfo -> [0x32,0,quality,mode BE]
                 //   then each cycle: runImage [7,0x0780] (FUN_180011950) + updateImage FBUR
                 //   (FUN_180013060). First cycle requests a full keyframe.
-                Diagnostics.KvmLog.Write($"Video start: 0x37, then [7,0x0780] + full FBUR ({Decoder.Width}x{Decoder.Height}).");
+                Diagnostics.KvmLog.Write($"Video start: query 0x37, set quality {ImageQuality}/mode {ImageMode}, " +
+                    $"then [7,0x0780] + full FBUR ({Decoder.Width}x{Decoder.Height}).");
                 lock (_sendLock)
                 {
                     _connection.Stream.WriteU8(0x37);
                     _connection.Stream.Flush();
                 }
+                SendScreenInfo(ImageQuality, ImageMode);
                 SendRunImage();                 // runImage [7,0x0780] - once, like the original
                 SendUpdate(incremental: false); // first keyframe (bare FBUR)
                 // Prime the request pipeline: keep PipelineDepth FBURs in flight so the BMC encodes
@@ -639,6 +647,20 @@ namespace ATENtion.Core.Net
                 _connection.Stream.Flush();
             }
             Diagnostics.KvmLog.Write($"TX mousemode {mode} : " + Diagnostics.KvmLog.Hex(frame));
+        }
+
+        /// <summary>Set the BMC image quality and chroma mode. Enhanced Text Mode uses mode 444
+        /// (<c>0x01bc</c>) and avoids the coloured fringes caused by YUV420 chroma subsampling.</summary>
+        public void SendScreenInfo(byte quality, ushort mode)
+        {
+            byte[] frame = ScreenInfoRequest.Build(quality, mode);
+            lock (_sendLock)
+            {
+                _connection.Stream.WriteBytes(frame);
+                _connection.Stream.Flush();
+            }
+            Diagnostics.KvmLog.Write($"TX screeninfo quality={quality} mode={mode} : " +
+                Diagnostics.KvmLog.Hex(frame));
         }
 
         /// <summary>Re-attach the virtual USB keyboard/mouse to the host ("Keyboard Mouse HotPlug" -

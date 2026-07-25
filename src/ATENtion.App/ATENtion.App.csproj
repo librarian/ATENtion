@@ -15,7 +15,7 @@
     <RootNamespace>ATENtion.App</RootNamespace>
     <AssemblyName>ATENtion</AssemblyName>
     <ApplicationIcon>atention.ico</ApplicationIcon>
-    <Version>1.0.4</Version>
+    <Version>1.0.5</Version>
     <Product>ATENtion</Product>
     <Description>Native console (KVM/virtual media) client for Supermicro/ATEN BMCs.</Description>
     <Authors>Thomas Jones</Authors>
