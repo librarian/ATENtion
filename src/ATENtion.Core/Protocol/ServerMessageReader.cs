@@ -143,6 +143,8 @@ namespace ATENtion.Core.Protocol
                         }
                         try
                         {
+                            if (rect.Encoding == 0x57)
+                                ATENtion.Core.Diagnostics.KvmLog.TryCaptureRawFrame(rect.Payload);
                             var d = decoder.DecodePacket(rect.Payload, rect.Encoding);
                             if (d != null) dirty.AddRange(d);
                             result.IsFrame = true;

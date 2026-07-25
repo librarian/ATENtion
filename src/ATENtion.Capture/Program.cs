@@ -283,7 +283,7 @@ namespace ATENtion.Capture
             Console.WriteLine();
             Console.WriteLine("Options:");
             Console.WriteLine("  --output FILE       BMP screenshot path (default: timestamped beside exe)");
-            Console.WriteLine("  --raw-output FILE   Also save the first unsupported raw packet, if one occurs");
+            Console.WriteLine("  --raw-output FILE   Also save the first raw ASPEED packet for offline analysis");
             Console.WriteLine("  --timeout SECONDS   Capture timeout (default: 30)");
             Console.WriteLine("  --web-port PORT     BMC web port (default: 443 for HTTPS)");
             Console.WriteLine("  --http              Use HTTP for BMC web login");

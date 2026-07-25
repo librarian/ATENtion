@@ -44,9 +44,9 @@ namespace ATENtion.Core.Net
     /// server messages in a loop. A dedicated input-sender thread drains a queue of keystrokes,
     /// clicks, and power commands, coalescing mouse moves to a paced trickle so that dragging
     /// the cursor cannot flood the BMC. A request timer, a keepalive timer, and a stall watchdog
-    /// keep the stream flowing and detect a dead link. The request side keeps a small, bounded
-    /// number of FramebufferUpdateRequests in flight (the pipeline) so the BMC encodes the next
-    /// frame while the current one is decoded and presented. The keepalive heartbeat is required
+    /// keep the stream flowing and detect a dead link. The request side keeps a bounded
+    /// number of FramebufferUpdateRequests in flight; the default is strict request/response
+    /// because ASPEED delta frames are baseline-dependent. The keepalive heartbeat is required
     /// for the BMC to keep servicing input. It also holds the socket open.
     /// </para>
     /// <para>
@@ -110,10 +110,7 @@ namespace ATENtion.Core.Net
         /// change, manual refresh), so a quiet, healthy session rarely pays the full-frame cost.
         /// The native viewer also periodically forces a full frame (updateImage's +0x5c flag).
         /// 0 disables.</summary>
-        public int FullRefreshIntervalTicks { get; set; } = 0; // disabled: original sends no periodic
-                                                               // fulls (video -> 0 when static). Resolution
-                                                               // changes are handled via msg.Resized; stale
-                                                               // tiles via manual View ▸ Refresh.
+        public int FullRefreshIntervalTicks { get; set; } = 5;
 
         /// <summary>Optional floor (ms) between incremental frame requests (video FPS cap). The earlier
         /// 80ms cap was only needed while the keyframe storm saturated the BMC and
@@ -123,12 +120,12 @@ namespace ATENtion.Core.Net
         public int MinFrameIntervalMs { get; set; } = 0;
         private int _lastRequestTick;
 
-        /// <summary>How many FramebufferUpdateRequests to keep in flight. Depth 2 lets the BMC
-        /// encode the next frame while the current one is decoded and presented (hiding the round-trip
-        /// and encode latency behind that work). It is NOT the old keyframe storm:
-        /// steady state is exactly one request per frame consumed, so depth is bounded at this value
-        /// and incrementals only. Set to 1 to revert to strict request->response.</summary>
-        public int PipelineDepth { get; set; } = 2;
+        /// <summary>How many FramebufferUpdateRequests to keep in flight. ASPEED delta frames must be
+        /// requested and applied in strict request/response order: allowing two outstanding requests
+        /// made some firmware encode the next delta against a baseline the client had not displayed,
+        /// producing duplicated or displaced text blocks. Keep the default at one. Higher values are
+        /// retained only as an explicit compatibility/performance experiment.</summary>
+        public int PipelineDepth { get; set; } = 1;
 
         /// <summary>FBURs sent but not yet answered by a FramebufferUpdate. Held ~= PipelineDepth;
         /// drives the steady-state top-up and the timer's liveness watchdog.</summary>
@@ -201,7 +198,7 @@ namespace ATENtion.Core.Net
                     if (!_running) return;
                     int t = System.Threading.Interlocked.Increment(ref _ticksSinceFull);
                     if (FullRefreshIntervalTicks > 0 && t >= FullRefreshIntervalTicks)
-                        SendUpdate(incremental: false);                       // periodic forced full (disabled by default)
+                        SendUpdate(incremental: false);                       // periodic forced full repairs any delta drift
                     else if (System.Threading.Volatile.Read(ref _outstanding) <= 0)
                         SendUpdate(incremental: true);                        // liveness watchdog ONLY: the pipeline
                                                                               // normally keeps PipelineDepth requests

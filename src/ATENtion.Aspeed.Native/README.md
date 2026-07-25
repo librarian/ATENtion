@@ -13,8 +13,14 @@ repository says GPL-3.0-or-later, while the repository license and source-file
 headers explicitly state MPL-2.0; this copy follows the license attached to the
 source files.
 
-The DLL is built for Windows x64 with:
+The DLL is built reproducibly for Windows x64 with llvm-mingw 20260616:
 
 ```text
-zig cc -target x86_64-windows-gnu -O2 -shared decoder.c -o aspeed_codec.dll
+x86_64-w64-mingw32-gcc -shared -O2 -std=c11 -s \
+  -Wl,--no-insert-timestamp -o aspeed_codec.dll decoder.c
 ```
+
+Do not build this source with Zig 0.15.1: that compiler produced a DLL which
+decoded only scattered macroblocks for valid AST2500 full frames. The same
+captured packet decoded correctly with ASPEED's JavaScript reference decoder,
+the Linux C build, and the llvm-mingw Windows build.

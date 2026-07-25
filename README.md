@@ -179,7 +179,7 @@ the first decoded frame as a BMP without opening the GUI:
 .\ATENtion.Capture.exe --host 10.8.54.20 --user admin --output console.bmp
 ```
 
-It prompts for the BMC password without echoing it. To retain the first still-unsupported
-packet while diagnosing another BMC codec, add `--raw-output packet.bin`. The GUI also
+It prompts for the BMC password without echoing it. To retain the exact first raw ASPEED
+packet alongside the screenshot, add `--raw-output packet.bin`. The GUI also
 writes one bounded `ATENtion-unsupported-frame.bin` when diagnostic logging is enabled.
 Screenshots and raw packets contain remote-console pixels, so treat them as sensitive.
