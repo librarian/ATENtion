@@ -459,7 +459,9 @@ namespace ATENtion.App
             SetStatus("● Connecting...", StateNeutral);
             UpdateTitle();
             ShowOverlay($"Connecting to {options.Host}...");
-            Core.Diagnostics.KvmLog.Write($"Connect requested: host={options.Host} port={options.Port} tls={options.UseTls} armViaWeb={armViaWeb} tokenLen={(options.Token ?? "").Length}");
+            Core.Diagnostics.KvmLog.Write($"Connect requested: host={options.Host} port={options.Port} " +
+                $"tls={options.UseTls} armViaWeb={armViaWeb} credentialLengths=" +
+                $"{(options.KvmUsername ?? "").Length}/{(options.KvmPassword ?? "").Length}");
 
             Task.Run(() =>
             {
@@ -468,7 +470,8 @@ namespace ATENtion.App
                     if (armViaWeb)
                     {
                         var arming = new Core.Net.BmcArmingClient().Arm(options.Host, bmcUser, bmcPassword);
-                        if (!string.IsNullOrEmpty(arming.Token)) options.Token = arming.Token;
+                        options.KvmUsername = arming.KvmUsername;
+                        options.KvmPassword = arming.KvmPassword;
                         // Mirror the original viewer's transport choice exactly: when the
                         // JNLP's stunEnable (arg8) is set it tunnels TLS to the server TLS port (arg9,
                         // e.g. 5900); otherwise it talks plaintext to the iKVM port (arg4, e.g. 63630).

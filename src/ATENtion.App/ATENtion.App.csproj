@@ -15,7 +15,7 @@
     <RootNamespace>ATENtion.App</RootNamespace>
     <AssemblyName>ATENtion</AssemblyName>
     <ApplicationIcon>atention.ico</ApplicationIcon>
-    <Version>1.0.0</Version>
+    <Version>1.0.3</Version>
     <Product>ATENtion</Product>
     <Description>Native console (KVM/virtual media) client for Supermicro/ATEN BMCs.</Description>
     <Authors>Thomas Jones</Authors>
@@ -45,6 +45,13 @@
     <!-- App icon (window/taskbar) + the larger artwork shown in the About box. -->
     <Resource Include="atention.ico" />
     <Resource Include="atention.png" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\ATENtion.Aspeed.Native\aspeed_codec.dll" Link="aspeed_codec.dll"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\ATENtion.Aspeed.Native\LICENSE" Link="ASPEED-CODEC-LICENSE.txt"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

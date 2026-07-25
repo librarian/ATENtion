@@ -99,15 +99,34 @@ namespace ATENtion.Core.Video
         /// <summary>
         /// Decodes one codec packet into <see cref="Frame"/> and returns the regions it changed.
         /// </summary>
-        /// <param name="packet">The codec packet, beginning with the ten-byte header.</param>
+        /// <param name="packet">The codec packet, beginning with the encoding-specific header.</param>
         /// <returns>The changed regions: the full-screen sentinel for a keyframe, or one
         /// rectangle per tile for an incremental update.</returns>
         /// <exception cref="ArgumentNullException"><paramref name="packet"/> is null.</exception>
         /// <exception cref="ArgumentException">A declared payload length exceeds the packet.</exception>
         /// <exception cref="UnsupportedEncodingException">The encoding has no decode path yet.</exception>
         public IReadOnlyList<DirtyRect> DecodePacket(byte[] packet)
+            => DecodePacket(packet, 0);
+
+        /// <summary>
+        /// Decodes one codec packet using the RFB rectangle encoding to select proprietary codecs
+        /// whose packet header is not the legacy ten-byte ATEN header.
+        /// </summary>
+        /// <param name="packet">The complete rectangle payload.</param>
+        /// <param name="rectangleEncoding">The RFB rectangle encoding (for example 0x57 for ASPEED).</param>
+        /// <returns>The changed regions.</returns>
+        public IReadOnlyList<DirtyRect> DecodePacket(byte[] packet, uint rectangleEncoding)
         {
             if (packet == null) throw new ArgumentNullException(nameof(packet));
+
+            // Encoding 0x57 is the AST2400/2500 ASPEED modified-JPEG stream. Its payload has a
+            // four-byte ATEN wrapper, not VideoPacketHeader's legacy ten-byte header:
+            // [selector][advance selector][0x01A6 = 4:2:0 or 0x01BC = 4:4:4][AJPG bits].
+            if (rectangleEncoding == 0x57)
+            {
+                AspeedNativeDecoder.Decode(packet, Frame);
+                return FullScreen;
+            }
 
             var header = VideoPacketHeader.Parse(packet);
 

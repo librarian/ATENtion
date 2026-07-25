@@ -6,8 +6,8 @@ using ATENtion.Core.Net;
 namespace ATENtion.Core.Protocol
 {
     /// <summary>
-    /// The iKVM credential exchange: reads the server challenge, sends the session token as both
-    /// the username and password fields, and checks the result.
+    /// The iKVM credential exchange: reads the server challenge, sends the two JNLP credentials
+    /// in their respective username and password fields, and checks the result.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -17,15 +17,11 @@ namespace ATENtion.Core.Protocol
     /// </para>
     /// <para>
     /// OPERATION - The server opens with a twenty-four-byte challenge, which the native client
-    /// reads but is not observed to fold into the credentials. The client then writes the token
-    /// twice, once as the username field and once as the password field, each twenty-four bytes,
+    /// reads but is not observed to fold into the credentials. The client then writes JNLP
+    /// argument 1 as the username and argument 2 as the password, each twenty-four bytes,
     /// ASCII, and NUL-padded. The server replies with a SecurityResult word. Zero is success: the
     /// client writes the ClientInit shared-flag (0), and ServerInit follows. A non-zero result is
     /// a rejection, optionally followed by a length-prefixed UTF-8 reason.
-    /// </para>
-    /// <para>
-    /// The token is sent the same way in both fields because the armed session presents identical
-    /// username and password token arguments. Sending it twice reproduces that.
     /// </para>
     /// <para>
     /// WIRE FORMAT -
@@ -63,21 +59,25 @@ namespace ATENtion.Core.Protocol
         /// <summary>Runs the token-challenge exchange against the stream.</summary>
         /// <param name="stream">The handshake stream, positioned at the server challenge.</param>
         /// <param name="securityType">The negotiated security type (logged for diagnostics).</param>
-        /// <param name="token">The per-session token, sent as both credential fields. Null is treated as empty.</param>
+        /// <param name="username">JNLP argument 1. Null is treated as empty.</param>
+        /// <param name="password">JNLP argument 2. Null is treated as empty.</param>
         /// <param name="crypto">Unused by this exchange (the credentials are sent in the clear).</param>
         /// <exception cref="ArgumentNullException"><paramref name="stream"/> is null.</exception>
         /// <exception cref="RfbAuthException">The server returned a non-zero SecurityResult.</exception>
-        public void Authenticate(BufferedRfbStream stream, byte securityType, string token, RfbkmCrypto crypto)
+        public void Authenticate(BufferedRfbStream stream, byte securityType,
+                                 string username, string password, RfbkmCrypto crypto)
         {
             if (stream == null) throw new ArgumentNullException(nameof(stream));
-            token = token ?? string.Empty;
+            username = username ?? string.Empty;
+            password = password ?? string.Empty;
 
             LastChallenge = stream.ReadExact(ChallengeLength);
             Diagnostics.KvmLog.Write("Auth: 24-byte challenge = " + Diagnostics.KvmLog.Hex(LastChallenge));
-            Diagnostics.KvmLog.Write($"Auth: sending credentials (token length {token.Length}, security type {securityType}).");
+            Diagnostics.KvmLog.Write($"Auth: sending credentials (lengths {username.Length}/" +
+                                     $"{password.Length}, security type {securityType}).");
 
-            stream.WriteBytes(FixedField(token, CredentialFieldLength)); // username field
-            stream.WriteBytes(FixedField(token, CredentialFieldLength)); // password field (same token)
+            stream.WriteBytes(FixedField(username, CredentialFieldLength));
+            stream.WriteBytes(FixedField(password, CredentialFieldLength));
             stream.Flush();
 
             uint result = stream.ReadU32BE();
@@ -100,7 +100,7 @@ namespace ATENtion.Core.Protocol
             stream.Flush();
         }
 
-        // Packs a token into a fixed-length field, ASCII-encoded and NUL-padded to length. A token
+        // Packs a credential into a fixed-length field, ASCII-encoded and NUL-padded to length. A value
         // longer than the field is truncated to fit.
         private static byte[] FixedField(string token, int length)
         {

@@ -12,7 +12,7 @@ namespace ATENtion.Tests
     /// <para>
     /// FUNCTION - Pins down that <see cref="RfbHandshake"/> driven over a <see cref="FakeDuplexStream"/>
     /// parses the version, security type, and ServerInit, and writes the correct bytes back: the version
-    /// echo, the chosen security type, the token in both 24-byte credential fields, and the ClientInit
+    /// echo, the chosen security type, the two 24-byte credential fields, and the ClientInit
     /// shared-flag. A failed SecurityResult raises <see cref="RfbAuthException"/> with the server's reason.
     /// </para>
     /// <para>
@@ -45,7 +45,8 @@ namespace ATENtion.Tests
             var transport = new FakeDuplexStream(BuildServerScript());
             var stream = new BufferedRfbStream(transport);
 
-            var session = new RfbHandshake().Run(stream, token: "abcd", crypto: new RfbkmCrypto());
+            var session = new RfbHandshake().Run(
+                stream, username: "user", password: "pass", crypto: new RfbkmCrypto());
 
             Assert.Equal(3, session.Version.Major);
             Assert.Equal(8, session.Version.Minor);
@@ -60,14 +61,17 @@ namespace ATENtion.Tests
             Assert.Equal("RFB 003.008\n", versionEcho);
             Assert.Equal(16, sent[12]);            // chosen security type
 
-            // username field (24 bytes) = "abcd" + NUL padding
-            Assert.Equal((byte)'a', sent[13]);
-            Assert.Equal((byte)'b', sent[14]);
-            Assert.Equal((byte)'c', sent[15]);
-            Assert.Equal((byte)'d', sent[16]);
+            // username field (24 bytes) = "user" + NUL padding
+            Assert.Equal((byte)'u', sent[13]);
+            Assert.Equal((byte)'s', sent[14]);
+            Assert.Equal((byte)'e', sent[15]);
+            Assert.Equal((byte)'r', sent[16]);
             for (int i = 17; i < 13 + 24; i++) Assert.Equal(0, sent[i]);
-            // password field begins right after (also "abcd"...)
-            Assert.Equal((byte)'a', sent[13 + 24]);
+            // password field begins right after and must be the separate JNLP argument 2.
+            Assert.Equal((byte)'p', sent[13 + 24]);
+            Assert.Equal((byte)'a', sent[14 + 24]);
+            Assert.Equal((byte)'s', sent[15 + 24]);
+            Assert.Equal((byte)'s', sent[16 + 24]);
             // ClientInit shared-flag (0) is the final byte.
             Assert.Equal(0, sent[13 + 48]);
             Assert.Equal(13 + 48 + 1, sent.Length);

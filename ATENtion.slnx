@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/ATENtion.App/ATENtion.App.csproj" />
+    <Project Path="src/ATENtion.Capture/ATENtion.Capture.csproj" />
     <Project Path="src/ATENtion.Core/ATENtion.Core.csproj" />
   </Folder>
   <Folder Name="/tests/">

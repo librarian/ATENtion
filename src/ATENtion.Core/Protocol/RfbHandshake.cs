@@ -47,9 +47,11 @@ namespace ATENtion.Core.Protocol
         /// <summary>Runs the authentication exchange for the negotiated security type.</summary>
         /// <param name="stream">The handshake stream, positioned after security negotiation.</param>
         /// <param name="securityType">The security type the client selected.</param>
-        /// <param name="token">The per-session token minted when the BMC armed the session.</param>
+        /// <param name="username">JNLP argument 1, sent in the ATEN username field.</param>
+        /// <param name="password">JNLP argument 2, sent in the ATEN password field.</param>
         /// <param name="crypto">The cipher used by security types that involve the AES key.</param>
-        void Authenticate(BufferedRfbStream stream, byte securityType, string token, RfbkmCrypto crypto);
+        void Authenticate(BufferedRfbStream stream, byte securityType,
+                          string username, string password, RfbkmCrypto crypto);
     }
 
     /// <summary>
@@ -70,7 +72,8 @@ namespace ATENtion.Core.Protocol
     {
         /// <summary>Always throws, because no real exchange is implemented for this path.</summary>
         /// <exception cref="NotImplementedException">Always, naming the unsupported security type.</exception>
-        public void Authenticate(BufferedRfbStream stream, byte securityType, string token, RfbkmCrypto crypto)
+        public void Authenticate(BufferedRfbStream stream, byte securityType,
+                                 string username, string password, RfbkmCrypto crypto)
         {
             throw new NotImplementedException(
                 $"RFB security type {securityType} auth not yet reversed. " +
@@ -132,11 +135,13 @@ namespace ATENtion.Core.Protocol
 
         /// <summary>Runs the full handshake and returns the negotiated session.</summary>
         /// <param name="stream">The connected RFB stream, positioned at the server's version banner.</param>
-        /// <param name="token">The per-session token for the authentication step.</param>
+        /// <param name="username">JNLP argument 1 for the authentication step.</param>
+        /// <param name="password">JNLP argument 2 for the authentication step.</param>
         /// <param name="crypto">The cipher used by cipher-based security types.</param>
         /// <returns>The negotiated <see cref="RfbSession"/>.</returns>
         /// <exception cref="ArgumentNullException"><paramref name="stream"/> is null.</exception>
-        public RfbSession Run(BufferedRfbStream stream, string token, RfbkmCrypto crypto)
+        public RfbSession Run(BufferedRfbStream stream, string username, string password,
+                              RfbkmCrypto crypto)
         {
             if (stream == null) throw new ArgumentNullException(nameof(stream));
 
@@ -155,7 +160,8 @@ namespace ATENtion.Core.Protocol
             //    the authenticator also writes the ClientInit shared-flag (0), matching the native
             //    login (FUN_1800120f0).
             Diagnostics.KvmLog.Write("Handshake: authenticating...");
-            _authenticator.Authenticate(stream, session.SecurityType, token, crypto);
+            _authenticator.Authenticate(
+                stream, session.SecurityType, username, password, crypto);
 
             // 4. ServerInit (framebuffer dimensions, pixel format, name).
             Diagnostics.KvmLog.Write("Handshake: reading ServerInit...");
@@ -165,5 +171,11 @@ namespace ATENtion.Core.Protocol
 
             return session;
         }
+
+        /// <summary>
+        /// Backward-compatible single-token handshake used by older callers and manual-token mode.
+        /// </summary>
+        public RfbSession Run(BufferedRfbStream stream, string token, RfbkmCrypto crypto) =>
+            Run(stream, token, token, crypto);
     }
 }

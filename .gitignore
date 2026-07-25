@@ -27,6 +27,13 @@ user.config
 
 # Runtime logs. These can contain a BMC IP, hostname, and a session token, so never commit them.
 *.log
+# Raw diagnostic video packets may contain pixels from the remote console.
+*-unsupported-frame.bin
+# Local diagnostic and release artifacts.
+captures/
+dist/
+src/ATENtion.Aspeed.Native/*.pdb
+src/ATENtion.Aspeed.Native/*.lib
 
 # OS cruft
 Thumbs.db

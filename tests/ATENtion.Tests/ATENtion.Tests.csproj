@@ -18,4 +18,9 @@
     <ProjectReference Include="..\..\src\ATENtion.Core\ATENtion.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="..\..\src\ATENtion.Aspeed.Native\aspeed_codec.dll" Link="aspeed_codec.dll"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

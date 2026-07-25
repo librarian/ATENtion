@@ -49,6 +49,9 @@ X11 generations should work, but they are presently untested.
 - A live Session Info panel (endpoint, transport, resolution, control state, frame rate,
   throughput, uptime).
 - Optional diagnostic logging, off by default.
+- ASPEED AST2400/AST2500 modified-JPEG video (`RFB encoding 0x57`), including
+  differential updates.
+- A command-line screenshot client for unattended diagnostics.
 
 ## Requirements
 
@@ -92,11 +95,14 @@ and virtual media all utilise the same connection.
 
 - `src/ATENtion.Core` - the protocol, video codec, input, crypto, and virtual-media logic.
 - `src/ATENtion.App` - the WPF application and its windows.
+- `src/ATENtion.Capture` - the command-line login and screenshot client.
+- `src/ATENtion.Aspeed.Native` - ASPEED's MPL-2.0 reference decoder and Windows x64 DLL.
 - `tests/ATENtion.Tests` - the unit tests.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+The application is MIT licensed; see [LICENSE](LICENSE). The ASPEED reference-decoder
+files are MPL-2.0; see `src/ATENtion.Aspeed.Native/LICENSE`.
 
 ---
 
@@ -108,10 +114,9 @@ The client certificate Supermicro bundles with iKVM has expired (around mid-2026
 TLS handshake on a correctly-set clock is refused. Two ways around it:
 
 1. **Roll the BMC clock back.** In the BMC web UI, under Configuration > Date and Time,
-   set the date to before the expiry (for example 2024), then reconnect. If TLS still
-   fails, temporarily set your Windows clock back to the same period as well. Windows
-   (SChannel) will not present an expired client certificate while its own clock says the
-   certificate is out of date, so both clocks may need to agree.
+   set the date to before the client-certificate expiry (for example 2024), then reconnect.
+   This workaround changes the BMC clock, not the Windows or WSL clock. It is required
+   only when the BMC rejects the mutual-TLS client certificate as expired.
 2. **Disable KVM SSL on the BMC.** Turn off SSL/encryption for the KVM console in the BMC
    web UI. The BMC then serves the plain-text iKVM port (63630) and no certificate is
    involved. ATENtion connects to it directly.
@@ -151,9 +156,9 @@ to your Windows user, never stored in the clear.
 
 ### What is in the log file, and is it safe to share?
 
-Logging is off by default. When it is on, the log can contain your BMC IP address,
-hostname, and session token. Do not share it. The repository ignores `*.log` so a session
-log is never committed.
+Logging is off by default. Passwords, JNLP credentials, cookies, and CSRF tokens are
+redacted. A log can still contain your BMC IP address, hostname, account name, client IP,
+and console metadata, so review it before sharing. The repository ignores `*.log`.
 
 ### Will it work on my board?
 
@@ -164,3 +169,17 @@ work, but they are untested.
 
 Use View > Refresh Screen. The real resolution is negotiated from the first video frame,
 so a refresh forces the BMC to send another full frame.
+
+### How do I capture a screenshot from the command line?
+
+The packaged `ATENtion.Capture.exe` companion logs in, starts the video stream, and saves
+the first decoded frame as a BMP without opening the GUI:
+
+```powershell
+.\ATENtion.Capture.exe --host 10.8.54.20 --user admin --output console.bmp
+```
+
+It prompts for the BMC password without echoing it. To retain the first still-unsupported
+packet while diagnosing another BMC codec, add `--raw-output packet.bin`. The GUI also
+writes one bounded `ATENtion-unsupported-frame.bin` when diagnostic logging is enabled.
+Screenshots and raw packets contain remote-console pixels, so treat them as sensitive.
