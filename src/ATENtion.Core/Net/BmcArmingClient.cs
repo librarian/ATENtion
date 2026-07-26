@@ -313,7 +313,11 @@ namespace ATENtion.Core.Net
         // Builds a request that carries the shared cookie container and the browser-like headers the BMC expects.
         private static HttpWebRequest NewRequest(string url, CookieContainer cookies, string referer)
         {
+            // Keep HttpWebRequest here so net48 and net8.0 use the same synchronous request,
+            // CookieContainer, redirect, and ServicePoint behavior against legacy BMC firmware.
+#pragma warning disable SYSLIB0014
             var req = (HttpWebRequest)WebRequest.Create(url);
+#pragma warning restore SYSLIB0014
             req.CookieContainer = cookies;
             req.UserAgent = UserAgent;
             req.Accept = "text/html,application/xhtml+xml,application/xml";
