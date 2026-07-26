@@ -3,7 +3,7 @@
 This directory contains the ASPEED Technology reference decoder from
 `AspeedTech-BMC/aspeed_codec`, adapted to:
 
-- export a small native Windows ABI (`aspeed_init`, `aspeed_decode`);
+- export a small native ABI (`aspeed_init`, `aspeed_decode`);
 - compile without Emscripten; and
 - set the alpha byte of decoded BGRA pixels to opaque;
 - restore the ASPEED VQ block decoding used by YUV444 Enhanced Text streams; and
@@ -20,6 +20,13 @@ The DLL is built reproducibly for Windows x64 with llvm-mingw 20260616:
 ```text
 x86_64-w64-mingw32-gcc -shared -O2 -std=c11 -s \
   -Wl,--no-insert-timestamp -o aspeed_codec.dll decoder.c
+```
+
+Linux and macOS builds use the system C compiler:
+
+```text
+cc -shared -fPIC -O2 -std=c11 -o libaspeed_codec.so decoder.c
+cc -dynamiclib -O2 -std=c11 -o libaspeed_codec.dylib decoder.c
 ```
 
 Do not build this source with Zig 0.15.1: that compiler produced a DLL which

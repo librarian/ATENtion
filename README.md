@@ -1,10 +1,11 @@
 # ATENtion
 
-A fast, native Windows console (KVM-over-IP) client for Supermicro servers with
-ATEN/Pilot BMCs. It is a from-scratch replacement for the old Java iKVM viewer.
+A native Windows console (KVM-over-IP) viewer and cross-platform diagnostic CLI for
+Supermicro servers with ATEN/Pilot BMCs. It is a from-scratch replacement for the old
+Java iKVM viewer.
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
-![Platform: Windows](https://img.shields.io/badge/platform-Windows-blue)
+![Platform: Windows, Linux, macOS](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue)
 ![.NET Framework 4.8](https://img.shields.io/badge/.NET%20Framework-4.8-blue)
 
 ![ATENtion connected to a Supermicro X9DRH-7F console](screenshot.png)
@@ -52,12 +53,14 @@ across the X9, X10, and X11 generations should work, but remain untested.
 - ASPEED AST2400/AST2500 modified-JPEG video (`RFB encoding 0x57`), including
   differential updates.
 - Enhanced Text Mode (YUV444) at maximum image quality for crisp coloured console text.
-- A command-line screenshot client for unattended diagnostics.
+- A cross-platform command-line screenshot and virtual-media client for unattended
+  diagnostics (Windows, Linux x64, and macOS Intel/Apple Silicon).
 
 ## Requirements
 
-- Windows 10 or later (may work on earlier - untested).
-- .NET Framework 4.8.
+- GUI: Windows 10 or later (may work on earlier - untested) and .NET Framework 4.8.
+- CLI release archives are self-contained and do not require a separately installed
+  .NET runtime.
 
 ## Build
 
@@ -69,6 +72,31 @@ dotnet build ATENtion.slnx -c Release
 
 The application is produced at `src/ATENtion.App/bin/Release/net48/ATENtion.exe`.
 Visual Studio 2022 also opens and builds `ATENtion.slnx` directly.
+
+The WPF viewer is Windows-only. Tagged releases also contain self-contained
+`ATENtion.Capture` CLI archives for Linux x64, macOS Intel, and macOS Apple Silicon.
+To build the portable CLI locally, first compile the ASPEED decoder for the host and
+then publish the .NET 8 target:
+
+```bash
+# Linux
+cc -shared -fPIC -O2 -std=c11 \
+  -o src/ATENtion.Aspeed.Native/libaspeed_codec.so \
+  src/ATENtion.Aspeed.Native/decoder.c
+dotnet publish src/ATENtion.Capture -c Release -f net8.0 -r linux-x64 --self-contained
+
+# macOS
+cc -dynamiclib -O2 -std=c11 \
+  -o src/ATENtion.Aspeed.Native/libaspeed_codec.dylib \
+  src/ATENtion.Aspeed.Native/decoder.c
+dotnet publish src/ATENtion.Capture -c Release -f net8.0 -r osx-arm64 --self-contained
+# Use -r osx-x64 instead on an Intel Mac.
+```
+
+Copy the native library into the publish directory beside the `ATENtion.Capture`
+executable. The release workflow performs this step automatically.
+Run `ATENtion.Capture --check-native-decoder` to verify that the platform library
+can be loaded before connecting to a BMC.
 
 ## Connecting
 
@@ -173,12 +201,14 @@ so a refresh forces the BMC to send another full frame.
 
 ### How do I capture a screenshot from the command line?
 
-The packaged `ATENtion.Capture.exe` companion logs in, starts the video stream, and saves
+The packaged `ATENtion.Capture` companion logs in, starts the video stream, and saves
 the first decoded frame as a BMP without opening the GUI:
 
 ```powershell
 .\ATENtion.Capture.exe --host 10.8.54.20 --user admin --output console.bmp
 ```
+
+On Linux or macOS, use the same arguments with `./ATENtion.Capture`.
 
 It prompts for the BMC password without echoing it. To retain the exact first raw ASPEED
 packet alongside the screenshot, add `--raw-output packet.bin`. The GUI also

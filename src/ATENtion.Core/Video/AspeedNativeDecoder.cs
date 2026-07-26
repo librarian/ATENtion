@@ -6,7 +6,13 @@ namespace ATENtion.Core.Video
     /// <summary>Managed wrapper for ASPEED's MPL-2.0 reference AJPG decoder.</summary>
     internal static class AspeedNativeDecoder
     {
+        // .NET Framework preserves the existing explicit Windows DLL lookup. Modern
+        // .NET applies the platform suffix: .so on Linux and .dylib on macOS.
+#if NETFRAMEWORK
         private const string LibraryName = "aspeed_codec.dll";
+#else
+        private const string LibraryName = "aspeed_codec";
+#endif
         private static readonly object Sync = new object();
         private static bool _initialized;
 
@@ -17,6 +23,14 @@ namespace ATENtion.Core.Video
         private static extern void NativeDecode(
             IntPtr input, int inputLength, IntPtr output, int width, int height,
             uint mode420, uint selector, uint advanceSelector);
+
+        internal static void VerifyAvailable()
+        {
+            lock (Sync)
+            {
+                EnsureInitialized();
+            }
+        }
 
         internal static void Decode(byte[] packet, FrameBuffer frame)
         {
@@ -35,11 +49,7 @@ namespace ATENtion.Core.Video
             {
                 try
                 {
-                    if (!_initialized)
-                    {
-                        NativeInit();
-                        _initialized = true;
-                    }
+                    EnsureInitialized();
 
                     inputHandle = GCHandle.Alloc(packet, GCHandleType.Pinned);
                     outputHandle = GCHandle.Alloc(frame.Pixels, GCHandleType.Pinned);
@@ -59,6 +69,13 @@ namespace ATENtion.Core.Video
                     if (inputHandle.IsAllocated) inputHandle.Free();
                 }
             }
+        }
+
+        private static void EnsureInitialized()
+        {
+            if (_initialized) return;
+            NativeInit();
+            _initialized = true;
         }
     }
 }

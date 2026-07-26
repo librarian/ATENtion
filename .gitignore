@@ -34,6 +34,8 @@ captures/
 dist/
 src/ATENtion.Aspeed.Native/*.pdb
 src/ATENtion.Aspeed.Native/*.lib
+src/ATENtion.Aspeed.Native/*.so
+src/ATENtion.Aspeed.Native/*.dylib
 
 # OS cruft
 Thumbs.db
