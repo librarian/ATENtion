@@ -143,7 +143,9 @@ namespace ATENtion.Core.Protocol
                         }
                         try
                         {
-                            var d = decoder.DecodePacket(rect.Payload);
+                            if (rect.Encoding == 0x57)
+                                ATENtion.Core.Diagnostics.KvmLog.TryCaptureRawFrame(rect.Payload);
+                            var d = decoder.DecodePacket(rect.Payload, rect.Encoding);
                             if (d != null) dirty.AddRange(d);
                             result.IsFrame = true;
                         }
@@ -151,7 +153,9 @@ namespace ATENtion.Core.Protocol
                         {
                             // One rectangle used an encoding the decoder does not handle. Skip it
                             // rather than aborting: its bytes are already consumed, so the stream
-                            // stays aligned and the remaining rectangles still decode.
+                            // stays aligned and the remaining rectangles still decode. With logging
+                            // enabled, retain the first complete packet for offline codec analysis.
+                            ATENtion.Core.Diagnostics.KvmLog.TryCaptureUnsupportedFrame(rect.Payload);
                             ATENtion.Core.Diagnostics.KvmLog.Write("  decode skipped: " + ex.Message);
                         }
                     }

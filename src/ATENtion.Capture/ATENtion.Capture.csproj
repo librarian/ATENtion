@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>ATENtion.Capture</AssemblyName>
+    <Version>1.0.5</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ATENtion.Core\ATENtion.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="..\ATENtion.App\client.pfx">
+      <LogicalName>client.pfx</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\ATENtion.Aspeed.Native\aspeed_codec.dll" Link="aspeed_codec.dll"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\ATENtion.Aspeed.Native\LICENSE" Link="ASPEED-CODEC-LICENSE.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

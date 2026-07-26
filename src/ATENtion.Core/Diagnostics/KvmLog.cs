@@ -32,12 +32,77 @@ namespace ATENtion.Core.Diagnostics
     public static class KvmLog
     {
         private static readonly object Gate = new object();
+        private static readonly object CaptureGate = new object();
+        private static bool _unsupportedFrameCaptured;
+        private const int MaxUnsupportedFrameBytes = 16 * 1024 * 1024;
 
         /// <summary>Raised for each log line; the UI subscribes to display it.</summary>
         public static event Action<string> Message;
 
         /// <summary>When set, every line is also appended to this file.</summary>
         public static string FilePath;
+
+        /// <summary>
+        /// Optional exact path for the one-shot unsupported-video dump. When null, the path is
+        /// derived from <see cref="FilePath"/>.
+        /// </summary>
+        public static string UnsupportedFrameFilePath;
+
+        /// <summary>
+        /// Writes the first unsupported video packet beside the diagnostic log for offline codec
+        /// analysis. Capture is active only while logging is enabled and is bounded to 16 MiB.
+        /// </summary>
+        /// <param name="packet">The complete ATEN codec packet, including its ten-byte header.</param>
+        /// <returns>The dump path when a packet was written; otherwise null.</returns>
+        public static string TryCaptureUnsupportedFrame(byte[] packet)
+            => TryCaptureFrame(packet, requireExplicitPath: false, description: "unsupported");
+
+        /// <summary>
+        /// Writes the first video packet to the explicitly configured capture path, including packets
+        /// whose codec is supported. Used by the capture CLI's <c>--raw-output</c> diagnostic option.
+        /// </summary>
+        public static string TryCaptureRawFrame(byte[] packet)
+            => TryCaptureFrame(packet, requireExplicitPath: true, description: "raw");
+
+        private static string TryCaptureFrame(byte[] packet, bool requireExplicitPath, string description)
+        {
+            if (!Enabled || packet == null || packet.Length == 0 ||
+                packet.Length > MaxUnsupportedFrameBytes || string.IsNullOrEmpty(FilePath) ||
+                (requireExplicitPath && string.IsNullOrEmpty(UnsupportedFrameFilePath)))
+                return null;
+
+            lock (CaptureGate)
+            {
+                if (_unsupportedFrameCaptured) return null;
+                _unsupportedFrameCaptured = true;
+
+                try
+                {
+                    string path = UnsupportedFrameFilePath;
+                    if (string.IsNullOrEmpty(path))
+                    {
+                        string directory = Path.GetDirectoryName(FilePath) ?? "";
+                        string stem = Path.GetFileNameWithoutExtension(FilePath);
+                        path = Path.Combine(directory, stem + "-unsupported-frame.bin");
+                    }
+                    File.WriteAllBytes(path, packet);
+                    Write($"Captured first {description} video packet: {path} ({packet.Length} bytes). " +
+                          "This file may contain sensitive console pixels.");
+                    return path;
+                }
+                catch (Exception ex)
+                {
+                    Write($"Unable to capture {description} video packet: " + ex.Message);
+                    return null;
+                }
+            }
+        }
+
+        /// <summary>Resets one-shot capture state for an isolated unit test.</summary>
+        internal static void ResetUnsupportedFrameCaptureForTests()
+        {
+            lock (CaptureGate) _unsupportedFrameCaptured = false;
+        }
 
         /// <summary>
         /// The master switch. Off by default: logging is opt-in through the UI's Logging menu so the

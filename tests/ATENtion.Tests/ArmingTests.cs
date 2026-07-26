@@ -24,7 +24,7 @@ namespace ATENtion.Tests
             string jnlp = @"<jnlp><application-desc main-class='tw.com.aten.ikvm.KVMMain'>
                 <argument>172.16.16.139</argument>
                 <argument>wulhxykewtfeaeyy</argument>
-                <argument>wulhxykewtfeaeyy</argument>
+                <argument>different-password==</argument>
                 <argument>PVE2-IPMI</argument>
                 <argument>63630</argument>
                 <argument>623</argument>
@@ -35,7 +35,8 @@ MIIDExamplecert==
 
             var r = BmcArmingClient.ParseJnlp(jnlp);
 
-            Assert.Equal("wulhxykewtfeaeyy", r.Token);
+            Assert.Equal("wulhxykewtfeaeyy", r.KvmUsername);
+            Assert.Equal("different-password==", r.KvmPassword);
             Assert.Equal(63630, r.KvmPort);
             Assert.NotNull(r.ServerCertificatePem);
             Assert.Contains("BEGIN CERTIFICATE", r.ServerCertificatePem);
@@ -46,12 +47,14 @@ MIIDExamplecert==
         public void ParseJnlp_Handles_Empty()
         {
             var r = BmcArmingClient.ParseJnlp("");
-            Assert.Null(r.Token);
+            Assert.Null(r.KvmUsername);
+            Assert.Null(r.KvmPassword);
         }
 
         [Theory]
         [InlineData("<script>SmcCsrfInsert('CSRF_TOKEN', \"abc123def\");</script>", "abc123def")]
         [InlineData("var x; SmcCsrfInsert(\"CSRF_TOKEN\",\"TOKVAL\")", "TOKVAL")]
+        [InlineData("SmcCsrfInsert (\"CSRF_TOKEN\", \"abc/DEF+ghi==\");", "abc/DEF+ghi==")]
         public void ExtractCsrfToken_Reads_Quoted_Value(string page, string expected)
         {
             Assert.Equal(expected, BmcArmingClient.ExtractCsrfToken(page));

@@ -11,7 +11,7 @@
     <RootNamespace>ATENtion.Core</RootNamespace>
     <AssemblyName>ATENtion.Core</AssemblyName>
     <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
-    <Version>1.0.0</Version>
+    <Version>1.0.5</Version>
     <Product>ATENtion</Product>
     <Authors>Thomas Jones</Authors>
     <Company>Thomas Jones</Company>

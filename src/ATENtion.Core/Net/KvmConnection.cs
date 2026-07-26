@@ -13,7 +13,7 @@ namespace ATENtion.Core.Net
     /// <remarks>
     /// <para>
     /// FUNCTION - Carries the host, port, transport security, client certificate, and session
-    /// token that a connection needs. The defaults match the iKVM parameters read from launch.jnlp.
+    /// credentials that a connection needs. The defaults match the iKVM parameters read from launch.jnlp.
     /// </para>
     /// </remarks>
     public sealed class KvmConnectionOptions
@@ -29,8 +29,18 @@ namespace ATENtion.Core.Net
         /// <summary>The TCP connect timeout, in milliseconds.</summary>
         public int ConnectTimeoutMs { get; set; } = 10000;
 
-        /// <summary>The per-session KVM token (token1/token2 from the JNLP).</summary>
-        public string Token { get; set; }
+        /// <summary>JNLP argument 1: the temporary ATEN username.</summary>
+        public string KvmUsername { get; set; }
+        /// <summary>JNLP argument 2: the temporary ATEN password.</summary>
+        public string KvmPassword { get; set; }
+        /// <summary>
+        /// Legacy manual-token property. Setting it uses the same value for both credential fields.
+        /// </summary>
+        public string Token
+        {
+            get => KvmUsername;
+            set { KvmUsername = value; KvmPassword = value; }
+        }
     }
 
     /// <summary>
@@ -119,7 +129,8 @@ namespace ATENtion.Core.Net
         public RfbSession Handshake(IRfbAuthenticator authenticator)
         {
             if (Stream == null) throw new InvalidOperationException("Call Connect() first.");
-            Session = new RfbHandshake(authenticator).Run(Stream, _options.Token, Crypto);
+            Session = new RfbHandshake(authenticator).Run(
+                Stream, _options.KvmUsername, _options.KvmPassword, Crypto);
             return Session;
         }
 

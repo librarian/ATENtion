@@ -10,7 +10,7 @@ namespace ATENtion.Core.Net
     /// <summary>The parsed outcome of arming a KVM session through the BMC web API.</summary>
     /// <remarks>
     /// <para>
-    /// FUNCTION - Holds the per-session values the JNLP arming response carries: the token, the
+    /// FUNCTION - Holds the per-session values the JNLP arming response carries: the credentials, the
     /// connection ports, the company and board identifiers, the TLS flag, and the server
     /// certificate, plus the derived preferred port and TLS decision.
     /// </para>
@@ -29,8 +29,19 @@ namespace ATENtion.Core.Net
     /// </remarks>
     public sealed class ArmingResult
     {
-        /// <summary>Argument 1 (equal to argument 2): the token used as both the KVM user and password.</summary>
-        public string Token { get; set; }
+        /// <summary>Argument 1: the temporary username sent in the first ATEN credential field.</summary>
+        public string KvmUsername { get; set; }
+        /// <summary>Argument 2: the temporary password sent in the second ATEN credential field.</summary>
+        public string KvmPassword { get; set; }
+        /// <summary>
+        /// Legacy single-token view. Setting it applies the same value to both credential fields;
+        /// reading it returns the temporary username.
+        /// </summary>
+        public string Token
+        {
+            get => KvmUsername;
+            set { KvmUsername = value; KvmPassword = value; }
+        }
         /// <summary>Argument 3: the session display name.</summary>
         public string HostName { get; set; }
         /// <summary>
@@ -135,7 +146,8 @@ namespace ATENtion.Core.Net
             KvmLog.Write($"Arming: POST {baseUrl}/cgi/login.cgi ...");
             string loginBody = "name=" + Uri.EscapeDataString(username) + "&pwd=" + Uri.EscapeDataString(password);
             int loginStatus = Post(baseUrl + "/cgi/login.cgi", loginBody, cookies, baseUrl, out _);
-            KvmLog.Write($"Arming: login.cgi HTTP {loginStatus}; cookies now: {cookies.GetCookieHeader(new Uri(baseUrl))}");
+            bool hasSessionCookie = !string.IsNullOrEmpty(cookies.GetCookieHeader(new Uri(baseUrl)));
+            KvmLog.Write($"Arming: login.cgi HTTP {loginStatus}; session cookie received={hasSessionCookie}.");
             if (loginStatus == 400)
                 throw new RfbProtocolExceptionShim("login.cgi returned 400 - this firmware likely needs the Redfish session path.");
 
@@ -150,8 +162,15 @@ namespace ATENtion.Core.Net
             var result = ParseJnlp(jnlp);
             if (result.Arguments != null)
                 for (int i = 0; i < result.Arguments.Count; i++)
-                    KvmLog.Write($"Arming: JNLP arg[{i}] = {result.Arguments[i]}");
-            KvmLog.Write($"Arming: parsed token (len {result.Token?.Length ?? 0}), host '{result.HostName}', " +
+                {
+                    // Arguments 1 and 2 are temporary credentials. Never place them in a log file.
+                    string value = (i == 1 || i == 2)
+                        ? $"<redacted; length {result.Arguments[i]?.Length ?? 0}>"
+                        : result.Arguments[i];
+                    KvmLog.Write($"Arming: JNLP arg[{i}] = {value}");
+                }
+            KvmLog.Write($"Arming: parsed credentials (lengths {result.KvmUsername?.Length ?? 0}/" +
+                         $"{result.KvmPassword?.Length ?? 0}), host '{result.HostName}', " +
                          $"iKVM/stunnel port {result.KvmPort}, server TLS port {result.VncPort}, stunEnable {result.StunEnable}, " +
                          $"vmedia {result.VirtualMediaPort}, company {result.CompanyId}, board {result.BoardId} -> " +
                          $"connect {result.PreferredPort} TLS={result.UseTls}, blowfish {result.BlowFish}, " +
@@ -180,15 +199,14 @@ namespace ATENtion.Core.Net
             catch (Exception ex) { KvmLog.Error("interface switch (continuing)", ex); }
         }
 
-        // Logs the page text around the "CSRF" marker so the token format can be confirmed per firmware.
+        // Logs only that a marker exists. The surrounding text contains the live token and must
+        // never be copied into a diagnostic log.
         private static void LogCsrfContext(string page)
         {
             if (string.IsNullOrEmpty(page)) { KvmLog.Write("Arming: topmenu empty."); return; }
             int i = page.IndexOf("CSRF", StringComparison.Ordinal);
             if (i < 0) { KvmLog.Write($"Arming: topmenu has no 'CSRF' (len {page.Length})."); return; }
-            int start = Math.Max(0, i - 16);
-            int len = Math.Min(140, page.Length - start);
-            KvmLog.Write("Arming: topmenu CSRF context: " + page.Substring(start, len).Replace("\r", " ").Replace("\n", " "));
+            KvmLog.Write($"Arming: topmenu contains a CSRF marker (page length {page.Length}); token value redacted.");
         }
 
         /// <summary>Extracts the CSRF token value from a BMC page, or null when none is present.</summary>
@@ -197,12 +215,11 @@ namespace ATENtion.Core.Net
         internal static string ExtractCsrfToken(string page)
         {
             if (string.IsNullOrEmpty(page)) return null;
-            int i = page.IndexOf("CSRF_TOKEN", StringComparison.Ordinal);
-            if (i < 0) return null;
-            string rest = page.Substring(i + "CSRF_TOKEN".Length);
-            // The token is the first quoted alphanumeric value after the CSRF_TOKEN label. The regex
-            // skips intervening quoted punctuation such as the label's own closing quote.
-            var m = Regex.Match(rest, "[\"']([A-Za-z0-9]{6,})[\"']");
+            // Firmware emits SmcCsrfInsert("CSRF_TOKEN", "value"). Tokens may contain Base64
+            // punctuation such as '/', '+', and '=', so capture everything up to the matching quote.
+            var m = Regex.Match(page,
+                "SmcCsrfInsert\\s*\\(\\s*[\"']CSRF_TOKEN[\"']\\s*,\\s*[\"']([^\"']+)[\"']",
+                RegexOptions.IgnoreCase);
             return m.Success ? m.Groups[1].Value : null;
         }
 
@@ -225,7 +242,8 @@ namespace ATENtion.Core.Net
             //   7 = boardId, 8 = stunEnable, 9 = server TLS port (5900).
             r.Arguments = args;
             int Int(int i) => (i < args.Count && int.TryParse(args[i], out int v)) ? v : 0;
-            if (args.Count > 1) r.Token = args[1];           // argument 1 (= argument 2): KVM user and password
+            if (args.Count > 1) r.KvmUsername = args[1];
+            if (args.Count > 2) r.KvmPassword = args[2];
             if (args.Count > 3) r.HostName = args[3];
             r.KvmPort = Int(4);
             r.VirtualMediaPort = Int(5);

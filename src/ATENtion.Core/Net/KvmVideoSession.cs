@@ -44,9 +44,9 @@ namespace ATENtion.Core.Net
     /// server messages in a loop. A dedicated input-sender thread drains a queue of keystrokes,
     /// clicks, and power commands, coalescing mouse moves to a paced trickle so that dragging
     /// the cursor cannot flood the BMC. A request timer, a keepalive timer, and a stall watchdog
-    /// keep the stream flowing and detect a dead link. The request side keeps a small, bounded
-    /// number of FramebufferUpdateRequests in flight (the pipeline) so the BMC encodes the next
-    /// frame while the current one is decoded and presented. The keepalive heartbeat is required
+    /// keep the stream flowing and detect a dead link. The request side keeps a bounded
+    /// number of FramebufferUpdateRequests in flight; the default is strict request/response
+    /// because ASPEED delta frames are baseline-dependent. The keepalive heartbeat is required
     /// for the BMC to keep servicing input. It also holds the socket open.
     /// </para>
     /// <para>
@@ -110,10 +110,7 @@ namespace ATENtion.Core.Net
         /// change, manual refresh), so a quiet, healthy session rarely pays the full-frame cost.
         /// The native viewer also periodically forces a full frame (updateImage's +0x5c flag).
         /// 0 disables.</summary>
-        public int FullRefreshIntervalTicks { get; set; } = 0; // disabled: original sends no periodic
-                                                               // fulls (video -> 0 when static). Resolution
-                                                               // changes are handled via msg.Resized; stale
-                                                               // tiles via manual View ▸ Refresh.
+        public int FullRefreshIntervalTicks { get; set; } = 5;
 
         /// <summary>Optional floor (ms) between incremental frame requests (video FPS cap). The earlier
         /// 80ms cap was only needed while the keyframe storm saturated the BMC and
@@ -123,12 +120,12 @@ namespace ATENtion.Core.Net
         public int MinFrameIntervalMs { get; set; } = 0;
         private int _lastRequestTick;
 
-        /// <summary>How many FramebufferUpdateRequests to keep in flight. Depth 2 lets the BMC
-        /// encode the next frame while the current one is decoded and presented (hiding the round-trip
-        /// and encode latency behind that work). It is NOT the old keyframe storm:
-        /// steady state is exactly one request per frame consumed, so depth is bounded at this value
-        /// and incrementals only. Set to 1 to revert to strict request->response.</summary>
-        public int PipelineDepth { get; set; } = 2;
+        /// <summary>How many FramebufferUpdateRequests to keep in flight. ASPEED delta frames must be
+        /// requested and applied in strict request/response order: allowing two outstanding requests
+        /// made some firmware encode the next delta against a baseline the client had not displayed,
+        /// producing duplicated or displaced text blocks. Keep the default at one. Higher values are
+        /// retained only as an explicit compatibility/performance experiment.</summary>
+        public int PipelineDepth { get; set; } = 1;
 
         /// <summary>FBURs sent but not yet answered by a FramebufferUpdate. Held ~= PipelineDepth;
         /// drives the steady-state top-up and the timer's liveness watchdog.</summary>
@@ -136,6 +133,12 @@ namespace ATENtion.Core.Net
 
         /// <summary>BMC mouse mode sent at startup: 1=Absolute, 2=Relative(NORMAL), 3=Single.</summary>
         public byte MouseMode { get; set; } = 1;
+
+        /// <summary>ATEN image-quality level sent at startup (0=lowest, 11=highest).</summary>
+        public byte ImageQuality { get; set; } = ScreenInfoRequest.MaximumQuality;
+
+        /// <summary>ATEN chroma mode sent at startup. 444 enables Enhanced Text Mode; 422 is Normal.</summary>
+        public ushort ImageMode { get; set; } = ScreenInfoRequest.EnhancedTextMode;
 
         /// <summary>Total frames decoded (FramebufferUpdates that produced pixels).</summary>
         public long FramesDecoded { get; private set; }
@@ -201,7 +204,7 @@ namespace ATENtion.Core.Net
                     if (!_running) return;
                     int t = System.Threading.Interlocked.Increment(ref _ticksSinceFull);
                     if (FullRefreshIntervalTicks > 0 && t >= FullRefreshIntervalTicks)
-                        SendUpdate(incremental: false);                       // periodic forced full (disabled by default)
+                        SendUpdate(incremental: false);                       // periodic forced full repairs any delta drift
                     else if (System.Threading.Volatile.Read(ref _outstanding) <= 0)
                         SendUpdate(incremental: true);                        // liveness watchdog ONLY: the pipeline
                                                                               // normally keeps PipelineDepth requests
@@ -342,16 +345,18 @@ namespace ATENtion.Core.Net
             int count = 0;
             try
             {
-                // Replicate the native DecodeThread startup wire sequence exactly:
-                //   updateInfo  -> [0x37]                 (FUN_180011a70, bare byte, once)
+                // Replicate the vendor viewer's startup wire sequence:
+                //   updateInfo -> [0x37], changeScreenInfo -> [0x32,0,quality,mode BE]
                 //   then each cycle: runImage [7,0x0780] (FUN_180011950) + updateImage FBUR
                 //   (FUN_180013060). First cycle requests a full keyframe.
-                Diagnostics.KvmLog.Write($"Video start: 0x37, then [7,0x0780] + full FBUR ({Decoder.Width}x{Decoder.Height}).");
+                Diagnostics.KvmLog.Write($"Video start: query 0x37, set quality {ImageQuality}/mode {ImageMode}, " +
+                    $"then [7,0x0780] + full FBUR ({Decoder.Width}x{Decoder.Height}).");
                 lock (_sendLock)
                 {
                     _connection.Stream.WriteU8(0x37);
                     _connection.Stream.Flush();
                 }
+                SendScreenInfo(ImageQuality, ImageMode);
                 SendRunImage();                 // runImage [7,0x0780] - once, like the original
                 SendUpdate(incremental: false); // first keyframe (bare FBUR)
                 // Prime the request pipeline: keep PipelineDepth FBURs in flight so the BMC encodes
@@ -642,6 +647,20 @@ namespace ATENtion.Core.Net
                 _connection.Stream.Flush();
             }
             Diagnostics.KvmLog.Write($"TX mousemode {mode} : " + Diagnostics.KvmLog.Hex(frame));
+        }
+
+        /// <summary>Set the BMC image quality and chroma mode. Enhanced Text Mode uses mode 444
+        /// (<c>0x01bc</c>) and avoids the coloured fringes caused by YUV420 chroma subsampling.</summary>
+        public void SendScreenInfo(byte quality, ushort mode)
+        {
+            byte[] frame = ScreenInfoRequest.Build(quality, mode);
+            lock (_sendLock)
+            {
+                _connection.Stream.WriteBytes(frame);
+                _connection.Stream.Flush();
+            }
+            Diagnostics.KvmLog.Write($"TX screeninfo quality={quality} mode={mode} : " +
+                Diagnostics.KvmLog.Hex(frame));
         }
 
         /// <summary>Re-attach the virtual USB keyboard/mouse to the host ("Keyboard Mouse HotPlug" -

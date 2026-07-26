@@ -46,5 +46,7 @@ namespace ATENtion.Core.Protocol
         public const byte PointerEvent = 5;
         /// <summary>Client OEM request (0x1a): prefixes the power-control record. Send path FUN_180013150.</summary>
         public const byte ClientRequest0x1a = 0x1a;
+        /// <summary>Set image quality and chroma mode (0x32): reserved byte, quality, then u16 BE mode.</summary>
+        public const byte SetScreenInfo = 0x32;
     }
 }
