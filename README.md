@@ -55,6 +55,8 @@ across the X9, X10, and X11 generations should work, but remain untested.
 - Enhanced Text Mode (YUV444) at maximum image quality for crisp coloured console text.
 - A cross-platform command-line screenshot and virtual-media client for unattended
   diagnostics (Windows, Linux x64, and macOS Intel/Apple Silicon).
+- Named server profiles with editable credentials, so one installation can switch between
+  multiple BMCs without re-entering connection details.
 
 ## Requirements
 
@@ -127,6 +129,7 @@ multi-connection attach handshake.
 - `src/ATENtion.App` - the WPF application and its windows.
 - `src/ATENtion.Capture` - the command-line login and screenshot client.
 - `src/ATENtion.Aspeed.Native` - ASPEED's MPL-2.0 reference decoder and Windows x64 DLL.
+- `tests/ATENtion.App.Tests` - Windows UI settings and connection-profile persistence tests.
 - `tests/ATENtion.Tests` - the unit tests.
 
 ## License
@@ -162,6 +165,14 @@ BMC. Token mode is for when you already have a session token (for example from a
 you downloaded) or you do not want the app to log in for you; you then set the port and
 TLS by hand. Because tokens are single-use and expire quickly, auto-arm is less trouble.
 
+### How do I correct a password or switch to another server?
+
+Use **Connection > Connect / Change server** at any time. The Connect dialog keeps named
+server profiles and lets you create, edit, or delete them. Choosing Connect saves the
+edited profile immediately, so correcting a password replaces the value used by the next
+attempt. A failed BMC web login is not auto-retried, preventing one typo from exhausting
+the BMC's login-attempt limit.
+
 ### Which port, and TLS or plain text?
 
 By default the console is mutual TLS on port 5900. If KVM SSL is disabled on the BMC, it
@@ -178,10 +189,12 @@ systems use, so it covers the common cases. Relative and Single modes are not do
 Use Storage > Mount ISO, or drag an `.iso` file onto the video. It appears to the host as
 a read-only CD-ROM. Unmount it from the Storage menu.
 
-### Where are my settings and BMC password stored?
+### Where are my settings and BMC passwords stored?
 
-In `user.config` under `%LOCALAPPDATA%`. The BMC password is protected with DPAPI scoped
-to your Windows user, never stored in the clear.
+In `%LOCALAPPDATA%\ATENtion\settings.xml`, a stable location that does not change with
+the application version or extraction directory. Existing `user.config` values are
+migrated on first run when Windows exposes them. Every saved profile password is protected
+with DPAPI scoped to your Windows user and is never stored in the clear.
 
 ### What is in the log file, and is it safe to share?
 

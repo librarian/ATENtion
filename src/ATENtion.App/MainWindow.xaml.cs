@@ -83,6 +83,7 @@ namespace ATENtion.App
         private const int ReconnectDelaySeconds = 5;
         private const int MaxReconnectAttempts = 10;
         private KvmConnectionOptions _connectOptions;
+        private ConnectSettings _connectProfile;
         private bool _armViaWeb;
         private string _bmcUser, _bmcPassword;
 
@@ -275,13 +276,14 @@ namespace ATENtion.App
         /// from the saved settings) and connect. Returns false if the user cancelled.</summary>
         private bool ShowConnectDialog()
         {
-            var dialog = new ConnectWindow { Owner = this };
+            var dialog = new ConnectWindow(_connectProfile) { Owner = this };
             bool? ok = dialog.ShowDialog();
             if (ok != true || string.IsNullOrWhiteSpace(dialog.Options.Host))
                 return false;
 
             // Remember these inputs so a dropped link can be auto-reconnected.
             _connectOptions = dialog.Options;
+            _connectProfile = dialog.Profile;
             _armViaWeb = dialog.ArmViaWeb;
             _bmcUser = dialog.BmcUser;
             _bmcPassword = dialog.BmcPassword;
@@ -380,6 +382,9 @@ namespace ATENtion.App
             else ShowConnectDialog();
         }
 
+        /// <summary>Open the editable saved-server dialog even when a current connection exists.</summary>
+        private void OnConnectOrChange(object sender, RoutedEventArgs e) => ShowConnectDialog();
+
         /// <summary>Explicit user disconnect: tear down and STAY down (cancels any pending auto-reconnect).</summary>
         private void OnDisconnect(object sender, RoutedEventArgs e)
         {
@@ -462,14 +467,17 @@ namespace ATENtion.App
             Core.Diagnostics.KvmLog.Write($"Connect requested: host={options.Host} port={options.Port} " +
                 $"tls={options.UseTls} armViaWeb={armViaWeb} credentialLengths=" +
                 $"{(options.KvmUsername ?? "").Length}/{(options.KvmPassword ?? "").Length}");
+            bool isAutomaticRetry = _reconnectAttempts > 0;
 
             Task.Run(() =>
             {
+                bool armingCompleted = !armViaWeb;
                 try
                 {
                     if (armViaWeb)
                     {
                         var arming = new Core.Net.BmcArmingClient().Arm(options.Host, bmcUser, bmcPassword);
+                        armingCompleted = true;
                         options.KvmUsername = arming.KvmUsername;
                         options.KvmPassword = arming.KvmPassword;
                         // Mirror the original viewer's transport choice exactly: when the
@@ -523,7 +531,8 @@ namespace ATENtion.App
                     Dispatcher.Invoke(() =>
                     {
                         string why = ex.Message;
-                        if (IsCertClockError(ex))
+                        bool certClockError = IsCertClockError(ex);
+                        if (certClockError)
                         {
                             why = "TLS handshake failed (SSPI) - the BMC's embedded client certificate has expired. "
                                 + "Wind the BMC/IPMI clock back to before the cert expiry (≈ mid-2026; e.g. set it to 2024) "
@@ -535,7 +544,32 @@ namespace ATENtion.App
                                     MessageBoxButton.OK, MessageBoxImage.Warning);
                             }
                         }
-                        ScheduleReconnect(why);
+                        bool loginSetupFailed = armViaWeb && !armingCompleted;
+                        if (loginSetupFailed || !isAutomaticRetry)
+                        {
+                            _reconnectTimer.Stop();
+                            _reconnectAttempts = 0;
+                            _userDisconnected = true;
+                            TearDownSession();
+                            _liveConnected = false;
+                            StatsText.Text = "";
+                            SetStatus(loginSetupFailed ? "● Login failed" : "● Connection failed", StateRed);
+                            ShowOverlay((loginSetupFailed ? "BMC login/session setup failed: " : "Connection failed: ") + why
+                                + "  -  use Connection ▸ Connect / Change server to edit the saved profile.");
+                            UpdateTitle();
+                            if (!certClockError)
+                            {
+                                MessageBox.Show(this,
+                                    (loginSetupFailed
+                                        ? "The BMC web login or session setup failed:\n\n"
+                                        : "The connection attempt failed:\n\n")
+                                    + why + "\n\nIt will not be retried automatically. Use Connection ▸ "
+                                    + "Connect / Change server to edit the saved profile and try again.",
+                                    loginSetupFailed ? "BMC login failed" : "Connection failed",
+                                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                            }
+                        }
+                        else ScheduleReconnect(why);
                     });
                 }
             });

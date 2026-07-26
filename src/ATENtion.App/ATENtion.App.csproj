@@ -15,7 +15,7 @@
     <RootNamespace>ATENtion.App</RootNamespace>
     <AssemblyName>ATENtion</AssemblyName>
     <ApplicationIcon>atention.ico</ApplicationIcon>
-    <Version>1.0.7</Version>
+    <Version>1.0.8</Version>
     <Product>ATENtion</Product>
     <Description>Native console (KVM/virtual media) client for Supermicro/ATEN BMCs.</Description>
     <Authors>Thomas Jones</Authors>
@@ -24,6 +24,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="ATENtion.App.Tests" />
     <ProjectReference Include="..\ATENtion.Core\ATENtion.Core.csproj" />
     <!-- ProtectedData (DPAPI) for storing the saved BMC password encrypted per-Windows-user. -->
     <Reference Include="System.Security" />
