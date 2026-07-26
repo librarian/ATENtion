@@ -1,104 +1,123 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 
 namespace ATENtion.App
 {
-    /// <summary>The Connect dialog inputs, persisted between runs, with the password protected at rest.</summary>
-    /// <remarks>
-    /// <para>
-    /// FUNCTION - Carries the values the <see cref="ConnectWindow"/> collects so they can be offered
-    /// again on the next run: the host, user, port, token, password, and the arm and TLS toggles.
-    /// </para>
-    /// <para>
-    /// OPERATION - A thin data carrier mapped onto <see cref="AppSettingsStore"/>. Every field is
-    /// stored as plain text except the BMC password, which is sealed with DPAPI scoped to the current
-    /// Windows user, so it is never written or read as plain text. The session token is per-session
-    /// and expires, but is remembered for convenience.
-    /// </para>
-    /// <para>
-    /// DEPENDENCIES - Backed by <see cref="AppSettingsStore"/>. The password protection uses the
-    /// Windows Data Protection API.
-    /// </para>
-    /// <para>
-    /// RESTRICTIONS - <see cref="Password"/> holds plain text only in memory. On disk it exists solely
-    /// as the DPAPI blob. A protect or unprotect failure yields an empty value rather than exposing or
-    /// retaining plain text.
-    /// </para>
-    /// </remarks>
+    /// <summary>A named BMC connection profile. Password plaintext exists only in process memory.</summary>
     public sealed class ConnectSettings
     {
-        /// <summary>The BMC host name or address.</summary>
+        public string Id = "";
+        public string Name = "";
         public string Host = "";
-        /// <summary>The BMC user name; defaults to "ADMIN".</summary>
         public string User = "ADMIN";
-        /// <summary>The connection port; defaults to "5900".</summary>
         public string Port = "5900";
-        /// <summary>The per-session KVM token.</summary>
         public string Token = "";
-        /// <summary>The BMC password; plain text in memory only, persisted DPAPI-protected as ConnPwd.</summary>
         public string Password = "";
-        /// <summary>True to arm the session through the web API before connecting.</summary>
         public bool Arm = true;
-        /// <summary>True to use TLS for the connection.</summary>
         public bool Tls = true;
 
-        /// <summary>Loads the Connect settings from the store, unprotecting the password.</summary>
-        /// <returns>The persisted settings, or the defaults on first run.</returns>
-        public static ConnectSettings Load()
+        public string DisplayName => !string.IsNullOrWhiteSpace(Name)
+            ? Name : !string.IsNullOrWhiteSpace(Host) ? Host : "New server";
+
+        public ConnectSettings Clone() => (ConnectSettings)MemberwiseClone();
+
+        /// <summary>Loads all saved profiles, with the most recently connected profile first.</summary>
+        public static List<ConnectSettings> LoadProfiles()
         {
-            var st = AppSettingsStore.Get();
-            return new ConnectSettings
-            {
-                Host = st.ConnHost ?? "",
-                User = string.IsNullOrEmpty(st.ConnUser) ? "ADMIN" : st.ConnUser,
-                Port = string.IsNullOrEmpty(st.ConnPort) ? "5900" : st.ConnPort,
-                Token = st.ConnToken ?? "",
-                Arm = st.ConnArm,
-                Tls = st.ConnTls,
-                Password = Unprotect(st.ConnPwd),
-            };
+            var store = StableSettingsStore.Get();
+            return store.Profiles
+                .OrderByDescending(p => p.Id == store.LastProfileId)
+                .ThenBy(p => string.IsNullOrEmpty(p.Name) ? p.Host : p.Name,
+                    StringComparer.OrdinalIgnoreCase)
+                .Select(FromStored)
+                .ToList();
         }
 
-        /// <summary>Saves the current Connect settings to the store, protecting the password.</summary>
+        public static ConnectSettings LoadLast()
+        {
+            var profiles = LoadProfiles();
+            return profiles.FirstOrDefault();
+        }
+
+        /// <summary>Saves the editable profile, including a DPAPI-protected password.</summary>
         public void Save()
         {
-            var st = AppSettingsStore.Get();
-            st.ConnHost = Host ?? "";
-            st.ConnUser = User ?? "";
-            st.ConnPort = Port ?? "";
-            st.ConnToken = Token ?? "";
-            st.ConnArm = Arm;
-            st.ConnTls = Tls;
-            st.ConnPwd = Protect(Password);
-            st.Save();
+            var store = StableSettingsStore.Get();
+            if (string.IsNullOrEmpty(Id)) Id = Guid.NewGuid().ToString("N");
+            var existing = store.Profiles.FirstOrDefault(p => p.Id == Id);
+            if (existing == null)
+            {
+                existing = new StableSettingsStore.StoredConnectionProfile { Id = Id };
+                store.Profiles.Add(existing);
+            }
+            existing.Name = string.IsNullOrWhiteSpace(Name) ? (Host ?? "").Trim() : Name.Trim();
+            existing.Host = (Host ?? "").Trim();
+            existing.User = string.IsNullOrWhiteSpace(User) ? "ADMIN" : User.Trim();
+            existing.Port = string.IsNullOrWhiteSpace(Port) ? "5900" : Port.Trim();
+            existing.Arm = Arm;
+            existing.Tls = Tls;
+            existing.ProtectedPassword = Protect(Password);
+            store.LastProfileId = Id;
+            store.Save();
+            Name = existing.Name;
         }
 
-        // Seals a plain-text secret with DPAPI (current-user scope) and returns it base64-encoded.
-        // On failure it returns empty, so nothing is persisted rather than persisting plain text.
+        public static void Delete(string id)
+        {
+            if (string.IsNullOrEmpty(id)) return;
+            var store = StableSettingsStore.Get();
+            store.Profiles.RemoveAll(p => p.Id == id);
+            if (store.LastProfileId == id)
+                store.LastProfileId = store.Profiles.FirstOrDefault()?.Id ?? "";
+            store.Save();
+        }
+
+        private static ConnectSettings FromStored(StableSettingsStore.StoredConnectionProfile value) =>
+            new ConnectSettings
+            {
+                Id = value.Id,
+                Name = value.Name,
+                Host = value.Host,
+                User = value.User,
+                Port = value.Port,
+                Password = Unprotect(value.ProtectedPassword),
+                Arm = value.Arm,
+                Tls = value.Tls,
+            };
+
         private static string Protect(string plain)
         {
             if (string.IsNullOrEmpty(plain)) return "";
             try
             {
-                byte[] enc = ProtectedData.Protect(
+                byte[] encrypted = ProtectedData.Protect(
                     Encoding.UTF8.GetBytes(plain), null, DataProtectionScope.CurrentUser);
-                return Convert.ToBase64String(enc);
+                return Convert.ToBase64String(encrypted);
             }
-            catch (Exception ex) { Core.Diagnostics.KvmLog.Error("DPAPI protect", ex); return ""; } // on failure, persist nothing rather than plain text
+            catch (Exception ex)
+            {
+                Core.Diagnostics.KvmLog.Error("DPAPI protect", ex);
+                return "";
+            }
         }
 
-        // Unseals a base64 DPAPI blob back to plain text, returning empty if it cannot be read.
-        private static string Unprotect(string b64)
+        private static string Unprotect(string protectedValue)
         {
-            if (string.IsNullOrEmpty(b64)) return "";
+            if (string.IsNullOrEmpty(protectedValue)) return "";
             try
             {
-                byte[] data = ProtectedData.Unprotect(
-                    Convert.FromBase64String(b64), null, DataProtectionScope.CurrentUser);
-                return Encoding.UTF8.GetString(data);
+                byte[] decrypted = ProtectedData.Unprotect(
+                    Convert.FromBase64String(protectedValue), null, DataProtectionScope.CurrentUser);
+                return Encoding.UTF8.GetString(decrypted);
             }
-            catch (Exception ex) { Core.Diagnostics.KvmLog.Error("DPAPI unprotect", ex); return ""; }
+            catch (Exception ex)
+            {
+                Core.Diagnostics.KvmLog.Error("DPAPI unprotect", ex);
+                return "";
+            }
         }
     }
 }

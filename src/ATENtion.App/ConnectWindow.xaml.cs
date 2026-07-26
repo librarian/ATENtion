@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Security.Cryptography.X509Certificates;
 using System.Windows;
 using ATENtion.Core.Net;
@@ -41,24 +43,91 @@ namespace ATENtion.App
         public string BmcUser { get; private set; }
         /// <summary>The BMC web password, used when <see cref="ArmViaWeb"/> is true.</summary>
         public string BmcPassword { get; private set; }
+        /// <summary>The selected editable server profile.</summary>
+        public ConnectSettings Profile { get; private set; }
+
+        private List<ConnectSettings> _profiles;
+        private string _editingProfileId = "";
+        private bool _loadingProfile;
 
         /// <summary>Builds the dialog, restoring the last-entered values and applying the arm gating.</summary>
-        public ConnectWindow()
+        public ConnectWindow(ConnectSettings initial = null)
         {
             InitializeComponent();
 
-            // Restore the last-entered values (see ConnectSettings).
-            var s = ConnectSettings.Load();
-            if (!string.IsNullOrEmpty(s.Host)) HostBox.Text = s.Host;
-            if (!string.IsNullOrEmpty(s.User)) UserBox.Text = s.User;
-            if (!string.IsNullOrEmpty(s.Port)) PortBox.Text = s.Port;
-            TokenBox.Text = s.Token ?? "";
-            PassBox.Password = s.Password ?? "";
-            ArmBox.IsChecked = s.Arm;
-            TlsBox.IsChecked = s.Tls;
+            _profiles = ConnectSettings.LoadProfiles();
+            ProfileBox.ItemsSource = _profiles;
+            bool initialStillSaved = initial != null &&
+                (string.IsNullOrEmpty(initial.Id) || _profiles.Any(p => p.Id == initial.Id));
+            ConnectSettings selected = initialStillSaved
+                ? initial.Clone() : _profiles.FirstOrDefault() ?? new ConnectSettings();
+            if (!string.IsNullOrEmpty(selected.Id))
+            {
+                _loadingProfile = true;
+                ProfileBox.SelectedItem = _profiles.FirstOrDefault(p => p.Id == selected.Id);
+                _loadingProfile = false;
+            }
+            LoadProfile(selected);
 
             // Apply the enable/disable gating now: the Checked/Unchecked events do not fire on load.
             ApplyArmGating();
+        }
+
+        private void LoadProfile(ConnectSettings value)
+        {
+            _loadingProfile = true;
+            try
+            {
+                _editingProfileId = value?.Id ?? "";
+                ProfileNameBox.Text = value?.Name ?? "";
+                HostBox.Text = value?.Host ?? "";
+                UserBox.Text = string.IsNullOrEmpty(value?.User) ? "ADMIN" : value.User;
+                PortBox.Text = string.IsNullOrEmpty(value?.Port) ? "5900" : value.Port;
+                TokenBox.Text = value?.Token ?? "";
+                PassBox.Password = value?.Password ?? "";
+                ArmBox.IsChecked = value?.Arm ?? true;
+                TlsBox.IsChecked = value?.Tls ?? true;
+                DeleteProfileBtn.IsEnabled = !string.IsNullOrEmpty(_editingProfileId);
+            }
+            finally { _loadingProfile = false; }
+            ApplyArmGating();
+        }
+
+        private void OnProfileChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+        {
+            if (_loadingProfile || !(ProfileBox.SelectedItem is ConnectSettings selected)) return;
+            LoadProfile(selected);
+        }
+
+        private void OnNewProfile(object sender, RoutedEventArgs e)
+        {
+            ProfileBox.SelectedItem = null;
+            LoadProfile(new ConnectSettings());
+            ProfileNameBox.Focus();
+        }
+
+        private void OnDeleteProfile(object sender, RoutedEventArgs e)
+        {
+            if (string.IsNullOrEmpty(_editingProfileId)) return;
+            string display = string.IsNullOrWhiteSpace(ProfileNameBox.Text)
+                ? HostBox.Text.Trim() : ProfileNameBox.Text.Trim();
+            if (MessageBox.Show(this, $"Delete saved server \"{display}\"?", "Delete server profile",
+                    MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+                return;
+
+            ConnectSettings.Delete(_editingProfileId);
+            _profiles = ConnectSettings.LoadProfiles();
+            ProfileBox.ItemsSource = _profiles;
+            if (_profiles.Count > 0)
+            {
+                ProfileBox.SelectedIndex = 0;
+                LoadProfile(_profiles[0]);
+            }
+            else
+            {
+                ProfileBox.SelectedItem = null;
+                LoadProfile(new ConnectSettings());
+            }
         }
 
         // Re-applies the field gating whenever the Arm checkbox is toggled.
@@ -142,26 +211,38 @@ namespace ATENtion.App
             ArmViaWeb = ArmBox.IsChecked == true;
             BmcUser = UserBox.Text.Trim();
             BmcPassword = PassBox.Password;
+            string host = HostBox.Text.Trim();
+            if (string.IsNullOrEmpty(host))
+            {
+                MessageBox.Show(this, "Enter a BMC host name or IP address.", "Host required",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+                HostBox.Focus();
+                return;
+            }
             Options = new KvmConnectionOptions
             {
-                Host = HostBox.Text.Trim(),
+                Host = host,
                 Port = port,
                 Token = TokenBox.Text.Trim(),
                 UseTls = TlsBox.IsChecked == true,
                 ClientCertificate = LoadClientCert(),
             };
 
-            // Remember these inputs for the next launch or reconnect.
-            new ConnectSettings
+            // Save the editable profile immediately. If a credential is wrong, Connection > Connect /
+            // Change server opens this same profile so the user can correct it before another attempt.
+            Profile = new ConnectSettings
             {
-                Host = HostBox.Text.Trim(),
+                Id = _editingProfileId,
+                Name = string.IsNullOrWhiteSpace(ProfileNameBox.Text) ? host : ProfileNameBox.Text.Trim(),
+                Host = host,
                 User = BmcUser,
                 Port = PortBox.Text.Trim(),
                 Token = TokenBox.Text.Trim(),
                 Password = BmcPassword,
                 Arm = ArmViaWeb,
                 Tls = TlsBox.IsChecked == true,
-            }.Save();
+            };
+            Profile.Save();
 
             DialogResult = true;
             Close();

@@ -60,6 +60,28 @@ MIIDExamplecert==
             Assert.Null(r.KvmPassword);
         }
 
+        [Fact]
+        public void ValidateArmingResult_Rejects_Login_Page_Without_Jnlp_Arguments()
+        {
+            var result = BmcArmingClient.ParseJnlp("<html><form id='login'></form></html>");
+
+            Assert.Throws<BmcLoginException>(() => BmcArmingClient.ValidateArmingResult(result));
+        }
+
+        [Fact]
+        public void ValidateArmingResult_Accepts_Usable_Session()
+        {
+            var result = new ArmingResult
+            {
+                KvmUsername = "temporary-user",
+                KvmPassword = "temporary-password",
+                VncPort = 5900,
+                StunEnable = 1,
+            };
+
+            BmcArmingClient.ValidateArmingResult(result);
+        }
+
         [Theory]
         [InlineData("<script>SmcCsrfInsert('CSRF_TOKEN', \"abc123def\");</script>", "abc123def")]
         [InlineData("var x; SmcCsrfInsert(\"CSRF_TOKEN\",\"TOKVAL\")", "TOKVAL")]

@@ -93,7 +93,9 @@
                         Unchecked="OnToggleSmoothScaling"/>
             </MenuItem>
             <MenuItem Header="_Connection">
-                <MenuItem Header="_Reconnect…"
+                <MenuItem Header="_Connect / Change server…"
+                        Click="OnConnectOrChange"/>
+                <MenuItem Header="_Reconnect current"
                         Click="OnReconnect"/>
                 <MenuItem Header="_Disconnect"
                         Click="OnDisconnect"/>

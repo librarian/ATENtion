@@ -156,6 +156,8 @@ namespace ATENtion.Core.Net
             KvmLog.Write($"Arming: login.cgi HTTP {loginStatus}; session cookie received={hasSessionCookie}.");
             if (loginStatus == 400)
                 throw new RfbProtocolExceptionShim("login.cgi returned 400 - this firmware likely needs the Redfish session path.");
+            if (!hasSessionCookie)
+                throw new BmcLoginException("The BMC did not create a login session. Check the user name and password.");
 
             // Ensure the KVM interface is the Java plug-in (0), not HTML5 (1). In HTML5 mode the
             // Java/RFB port is never opened, so the jwsk request alone does not arm it.
@@ -166,6 +168,7 @@ namespace ATENtion.Core.Net
             KvmLog.Write($"Arming: jwsk response {jnlp?.Length ?? 0} bytes.");
 
             var result = ParseJnlp(jnlp);
+            ValidateArmingResult(result);
             if (result.Arguments != null)
                 for (int i = 0; i < result.Arguments.Count; i++)
                 {
@@ -183,6 +186,22 @@ namespace ATENtion.Core.Net
                          $"connect {result.PreferredPort} TLS={result.UseTls}, blowfish {result.BlowFish}, " +
                          $"server cert {(result.ServerCertificatePem != null ? "present" : "absent")}.");
             return result;
+        }
+
+        /// <summary>
+        /// Rejects a login-page/error response masquerading as HTTP 200 instead of letting an empty
+        /// JNLP fall through to repeated RFB attempts with stale credentials.
+        /// </summary>
+        internal static void ValidateArmingResult(ArmingResult result)
+        {
+            if (result == null
+                || string.IsNullOrEmpty(result.KvmUsername)
+                || string.IsNullOrEmpty(result.KvmPassword)
+                || result.PreferredPort <= 0)
+            {
+                throw new BmcLoginException(
+                    "The BMC did not return a usable iKVM session. Check the saved user name and password.");
+            }
         }
 
         // Scrapes the CSRF token from the top menu and posts op.cgi to set ikvm_setting=0 (the Java
@@ -337,6 +356,12 @@ namespace ATENtion.Core.Net
         /// <summary>Creates the exception with a description of the arming failure.</summary>
         /// <param name="message">What went wrong.</param>
         public RfbProtocolExceptionShim(string message) : base(message) { }
+    }
+
+    /// <summary>A non-retryable BMC web-login or session-creation failure.</summary>
+    public sealed class BmcLoginException : Exception
+    {
+        public BmcLoginException(string message) : base(message) { }
     }
 
     /// <summary>Installs a process-wide trust-all policy for the BMC's self-signed web certificate.</summary>

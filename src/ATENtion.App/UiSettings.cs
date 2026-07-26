@@ -7,13 +7,13 @@ namespace ATENtion.App
     /// window's position and size, whether it was maximised, and the view toggles.
     /// </para>
     /// <para>
-    /// OPERATION - A thin data carrier mapped onto <see cref="AppSettingsStore"/>, the user.config
-    /// store. <see cref="Load"/> reads the stored values; <see cref="Save"/> writes them back. The
+    /// OPERATION - A thin data carrier mapped onto <see cref="StableSettingsStore"/>.
+    /// <see cref="Load"/> reads the stored values; <see cref="Save"/> writes them back. The
     /// public field surface matches the earlier file-backed version, so existing call sites are
     /// unchanged.
     /// </para>
     /// <para>
-    /// DEPENDENCIES - Backed by <see cref="AppSettingsStore"/>. All values are non-secret;
+    /// DEPENDENCIES - Backed by <see cref="StableSettingsStore"/>. All values are non-secret;
     /// credentials live in <see cref="ConnectSettings"/>.
     /// </para>
     /// </remarks>
@@ -46,7 +46,7 @@ namespace ATENtion.App
         /// <returns>The persisted settings, or the defaults on first run.</returns>
         public static UiSettings Load()
         {
-            var st = AppSettingsStore.Get();
+            var st = StableSettingsStore.Get();
             return new UiSettings
             {
                 Left = st.WinLeft,
@@ -66,7 +66,7 @@ namespace ATENtion.App
         /// <summary>Saves the current UI settings to the store.</summary>
         public void Save()
         {
-            var st = AppSettingsStore.Get();
+            var st = StableSettingsStore.Get();
             st.WinLeft = Left;
             st.WinTop = Top;
             st.WinWidth = Width;

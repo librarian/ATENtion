@@ -5,6 +5,7 @@
     <Project Path="src/ATENtion.Core/ATENtion.Core.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/ATENtion.App.Tests/ATENtion.App.Tests.csproj" />
     <Project Path="tests/ATENtion.Tests/ATENtion.Tests.csproj" />
   </Folder>
 </Solution>
