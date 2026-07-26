@@ -57,10 +57,10 @@ namespace ATENtion.Tests
             Assert.Equal(ScsiCdRomTarget.InquiryData, r.Data);
             Assert.Equal((byte)0x05, r.Data[0]);  // peripheral device type = CD/DVD
             Assert.Equal((byte)0x80, r.Data[1]);  // RMB removable
-            // vendor "ATEN", product begins "Virtual", revision "YS0J"
-            Assert.Equal("ATEN", System.Text.Encoding.ASCII.GetString(r.Data, 8, 4));
+            // vendor "IPMI", product begins "Virtual", revision "3000"
+            Assert.Equal("IPMI", System.Text.Encoding.ASCII.GetString(r.Data, 8, 4));
             Assert.Equal("Virtual", System.Text.Encoding.ASCII.GetString(r.Data, 16, 7));
-            Assert.Equal("YS0J", System.Text.Encoding.ASCII.GetString(r.Data, 32, 4));
+            Assert.Equal("3000", System.Text.Encoding.ASCII.GetString(r.Data, 32, 4));
         }
 
         [Fact]
@@ -137,6 +137,27 @@ namespace ATENtion.Tests
             Assert.Equal(0x01, r.Data[3]); // last track
             Assert.Equal(0x14, r.Data[5]); // ADR/control data track
             Assert.Equal(0x01, r.Data[6]); // track number 1
+        }
+
+        [Fact]
+        public void LinuxMmcDiscoveryCommands_AreSupported()
+        {
+            var config = _target.Execute(Cbw(11, 152, true, 0x46, 0, 0, 0, 0, 0, 0, 0, 152, 0));
+            Assert.Equal(0, config.Status);
+            Assert.Equal(152, config.Data.Length);
+
+            var disc = _target.Execute(Cbw(12, 34, true, 0x51, 0, 0, 0, 0, 0, 0, 0, 34, 0));
+            Assert.Equal(0, disc.Status);
+            Assert.Equal(34, disc.Data.Length);
+
+            var track = _target.Execute(Cbw(13, 30, true, 0x52, 1, 0, 0, 0, 1, 0, 0, 30, 0));
+            Assert.Equal(0, track.Status);
+            Assert.Equal(28, track.Data.Length);
+            Assert.Equal((byte)Sectors, track.Data[27]);
+
+            var events = _target.Execute(Cbw(14, 8, true, 0x4A, 1, 0, 0, 0x10, 0, 0, 0, 8, 0));
+            Assert.Equal(0, events.Status);
+            Assert.Equal(new byte[] { 0, 6, 4, 0x5E, 0, 2, 0, 0 }, events.Data);
         }
 
         public void Dispose()

@@ -27,7 +27,13 @@ namespace ATENtion.Tests
                 <argument>different-password==</argument>
                 <argument>PVE2-IPMI</argument>
                 <argument>63630</argument>
+                <argument>63631</argument>
+                <argument>0</argument>
+                <argument>0</argument>
+                <argument>1</argument>
+                <argument>5900</argument>
                 <argument>623</argument>
+                <argument>1</argument>
                 <argument>-----BEGIN CERTIFICATE-----
 MIIDExamplecert==
 -----END CERTIFICATE-----</argument>
@@ -38,6 +44,9 @@ MIIDExamplecert==
             Assert.Equal("wulhxykewtfeaeyy", r.KvmUsername);
             Assert.Equal("different-password==", r.KvmPassword);
             Assert.Equal(63630, r.KvmPort);
+            Assert.Equal(63631, r.VirtualMediaLocalPort);
+            Assert.Equal(623, r.VirtualMediaPort);
+            Assert.Equal(1, r.VirtualMediaEnabled);
             Assert.NotNull(r.ServerCertificatePem);
             Assert.Contains("BEGIN CERTIFICATE", r.ServerCertificatePem);
             Assert.Contains("END CERTIFICATE", r.ServerCertificatePem);

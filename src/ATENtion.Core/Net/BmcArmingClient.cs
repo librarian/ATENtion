@@ -23,8 +23,10 @@ namespace ATENtion.Core.Net
     /// <para>
     /// PROVENANCE - Argument semantics recovered from the ATEN viewer's KVMMain constructor (javap of
     /// iKVM__V1.69.39.0x0.jar); the positional layout is argument 0 = server IP, 1 = user token,
-    /// 2 = password token, 3 = host name, 4 = iKVM/stunnel-local port, 5 = virtual-media/IPMI port,
-    /// 6 = company id, 7 = board id, 8 = stunnel-enable, 9 = server TLS port.
+    /// 2 = password token, 3 = host name, 4 = iKVM/stunnel-local port,
+    /// 5 = virtual-media/stunnel-local port, 6 = company id, 7 = board id,
+    /// 8 = stunnel-enable, 9 = server TLS KVM port, 10 = server TLS virtual-media port,
+    /// and 11 = virtual-media enabled.
     /// </para>
     /// </remarks>
     public sealed class ArmingResult
@@ -53,8 +55,12 @@ namespace ATENtion.Core.Net
         public int VncPort { get; set; }
         /// <summary>Argument 8: stunnel-enable. 1 means the original wraps the link in TLS to <see cref="VncPort"/>.</summary>
         public int StunEnable { get; set; }
-        /// <summary>Argument 5: the virtual-media / IPMI port.</summary>
+        /// <summary>Argument 5: stunnel's local plaintext accept port for virtual media.</summary>
+        public int VirtualMediaLocalPort { get; set; }
+        /// <summary>Argument 10: the server-side virtual-media TLS port (normally 623).</summary>
         public int VirtualMediaPort { get; set; }
+        /// <summary>Argument 11: 1 when the BMC exposes virtual media for this session.</summary>
+        public int VirtualMediaEnabled { get; set; }
         /// <summary>Argument 6: the company identifier.</summary>
         public int CompanyId { get; set; }
         /// <summary>Argument 7: the board identifier.</summary>
@@ -172,7 +178,8 @@ namespace ATENtion.Core.Net
             KvmLog.Write($"Arming: parsed credentials (lengths {result.KvmUsername?.Length ?? 0}/" +
                          $"{result.KvmPassword?.Length ?? 0}), host '{result.HostName}', " +
                          $"iKVM/stunnel port {result.KvmPort}, server TLS port {result.VncPort}, stunEnable {result.StunEnable}, " +
-                         $"vmedia {result.VirtualMediaPort}, company {result.CompanyId}, board {result.BoardId} -> " +
+                         $"vmedia local/server {result.VirtualMediaLocalPort}/{result.VirtualMediaPort}, " +
+                         $"vmedia enabled {result.VirtualMediaEnabled}, company {result.CompanyId}, board {result.BoardId} -> " +
                          $"connect {result.PreferredPort} TLS={result.UseTls}, blowfish {result.BlowFish}, " +
                          $"server cert {(result.ServerCertificatePem != null ? "present" : "absent")}.");
             return result;
@@ -226,7 +233,7 @@ namespace ATENtion.Core.Net
         /// <summary>Parses a launch JNLP into an <see cref="ArmingResult"/> by argument position.</summary>
         /// <param name="jnlp">The JNLP text.</param>
         /// <returns>The parsed result; empty fields when the JNLP is missing or short.</returns>
-        internal static ArmingResult ParseJnlp(string jnlp)
+        public static ArmingResult ParseJnlp(string jnlp)
         {
             var r = new ArmingResult { RawJnlp = jnlp };
             if (string.IsNullOrEmpty(jnlp)) return r;
@@ -238,19 +245,22 @@ namespace ATENtion.Core.Net
 
             // Positional layout, faithful to the ATEN viewer's KVMMain:
             //   0 = serverIp, 1 = user (token), 2 = password (token), 3 = hostName,
-            //   4 = iKVM/stunnel-local port, 5 = virtual-media/IPMI port, 6 = companyId,
-            //   7 = boardId, 8 = stunEnable, 9 = server TLS port (5900).
+            //   4 = iKVM/stunnel-local port, 5 = vmedia/stunnel-local port, 6 = companyId,
+            //   7 = boardId, 8 = stunEnable, 9 = server TLS KVM port (5900),
+            //   10 = server TLS virtual-media port (623), 11 = virtual-media enabled.
             r.Arguments = args;
             int Int(int i) => (i < args.Count && int.TryParse(args[i], out int v)) ? v : 0;
             if (args.Count > 1) r.KvmUsername = args[1];
             if (args.Count > 2) r.KvmPassword = args[2];
             if (args.Count > 3) r.HostName = args[3];
             r.KvmPort = Int(4);
-            r.VirtualMediaPort = Int(5);
+            r.VirtualMediaLocalPort = Int(5);
             r.CompanyId = Int(6);
             r.BoardId = Int(7);
             r.StunEnable = Int(8);
             r.VncPort = Int(9);
+            r.VirtualMediaPort = Int(10);
+            r.VirtualMediaEnabled = Int(11);
 
             // The embedded server certificate (BEGIN/END CERTIFICATE), when present.
             var certMatch = Regex.Match(jnlp, "-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", RegexOptions.Singleline);

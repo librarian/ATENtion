@@ -477,8 +477,13 @@ namespace ATENtion.App
                         // e.g. 5900); otherwise it talks plaintext to the iKVM port (arg4, e.g. 63630).
                         if (arming.PreferredPort > 0) options.Port = arming.PreferredPort;
                         options.UseTls = arming.UseTls;
+                        if (arming.VirtualMediaPort > 0)
+                            options.VirtualMediaPort = arming.VirtualMediaPort;
+                        options.VirtualMediaUseTls = arming.UseTls;
+                        options.VirtualMediaEnabled = arming.VirtualMediaEnabled != 0;
                         Core.Diagnostics.KvmLog.Write($"Arming complete: connecting to port {options.Port} " +
-                            $"(iKVM {arming.KvmPort}, TLS {arming.VncPort}, stunEnable {arming.StunEnable}), TLS={options.UseTls}.");
+                            $"(iKVM {arming.KvmPort}, TLS {arming.VncPort}, stunEnable {arming.StunEnable}), TLS={options.UseTls}; " +
+                            $"vmedia server port {options.VirtualMediaPort}, enabled={options.VirtualMediaEnabled}.");
                     }
 
                     _session = new KvmVideoSession(options)
@@ -991,10 +996,19 @@ namespace ATENtion.App
                 FlashStatus("Connect to a BMC first."); return;
             }
             if (_vmedia != null) { FlashStatus("An ISO is already mounted - unmount first."); return; }
+            if (!_connectOptions.VirtualMediaEnabled)
+            {
+                FlashStatus("This BMC session does not advertise virtual-media support."); return;
+            }
 
             var vm = new VirtualMediaSession(new VirtualMediaOptions
             {
                 Host = _connectOptions.Host,
+                Port = _connectOptions.VirtualMediaPort,
+                UseTls = _connectOptions.VirtualMediaUseTls,
+                ClientCertificate = _connectOptions.ClientCertificate,
+                Username = _connectOptions.KvmUsername,
+                Password = _connectOptions.KvmPassword,
                 ImagePath = path,
             });
             // Keep the handlers in fields so ClearVmedia can detach them before Dispose - otherwise

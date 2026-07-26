@@ -29,9 +29,9 @@ address and credentials and you are on the console.
 
 ## Status and tested hardware
 
-This has been tested on one board thus far: my **Supermicro X9DRH-7F** (X9 generation, 
-with an ATEN/Pilot BMC). Other ATEN/Pilot-based Supermicro BMCs across the X9, X10, and 
-X11 generations should work, but they are presently untested.
+This has been tested on a **Supermicro X9DRH-7F** (X9 generation, with an ATEN/Pilot
+BMC) and an AST2400-based Supermicro X10 BMC. Other ATEN/Pilot-based Supermicro BMCs
+across the X9, X10, and X11 generations should work, but remain untested.
 
 ## Features
 
@@ -89,8 +89,9 @@ boards. See the FAQ entry on the expired certificate below.
 
 ATENtion is a native client for the ATEN variant of the RFB/VNC protocol that Supermicro
 iKVM uses. It connects with mutual TLS to the BMC KVM port (5900 by default), or in plain
-text to the iKVM port (63630) when KVM SSL is turned off on the BMC. Video, input, power,
-and virtual media all utilise the same connection.
+text to the iKVM port (63630) when KVM SSL is turned off on the BMC. Virtual media uses
+the separately advertised media endpoint (normally mutual TLS on port 623) and ATEN's
+multi-connection attach handshake.
 
 ## Project layout
 
@@ -147,8 +148,7 @@ systems use, so it covers the common cases. Relative and Single modes are not do
 ### How do I mount an ISO?
 
 Use Storage > Mount ISO, or drag an `.iso` file onto the video. It appears to the host as
-a read-only CD-ROM. Unmount it from the Storage menu. This has been a bit buggy for me, so
-please raise an issue if you encounter any issues.
+a read-only CD-ROM. Unmount it from the Storage menu.
 
 ### Where are my settings and BMC password stored?
 
@@ -184,3 +184,12 @@ It prompts for the BMC password without echoing it. To retain the exact first ra
 packet alongside the screenshot, add `--raw-output packet.bin`. The GUI also
 writes one bounded `ATENtion-unsupported-frame.bin` when diagnostic logging is enabled.
 Screenshots and raw packets contain remote-console pixels, so treat them as sensitive.
+
+The same companion can mount an ISO for unattended diagnostics:
+
+```powershell
+.\ATENtion.Capture.exe --host 10.8.54.20 --user admin --mount-iso .\installer.iso --timeout 120
+```
+
+It reports the number of SCSI commands and bytes served. The timeout or Ctrl+C performs
+a clean virtual-media detach.

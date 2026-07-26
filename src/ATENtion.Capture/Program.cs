@@ -16,6 +16,11 @@ namespace ATENtion.Capture
             public string User;
             public string Output;
             public string RawOutput;
+            public string MountIso;
+            public string Jnlp;
+            public string VirtualMediaHost;
+            public int VirtualMediaPort;
+            public bool VirtualMediaPlain;
             public string ClientPfx;
             public int TimeoutSeconds = 30;
             public int WebPort;
@@ -71,15 +76,28 @@ namespace ATENtion.Capture
             KvmLog.Enabled = true;
             KvmLog.Message += Console.WriteLine;
 
-            Console.Write("BMC password: ");
-            string password = ReadPassword();
-            Console.WriteLine();
+            string password = null;
+            if (string.IsNullOrEmpty(cli.Jnlp))
+            {
+                Console.Write("BMC password: ");
+                password = ReadPassword();
+                Console.WriteLine();
+            }
 
             try
             {
-                Console.WriteLine("Arming the Java iKVM session...");
-                ArmingResult arming = new BmcArmingClient().Arm(
-                    cli.Host, cli.User, password, cli.UseHttps, cli.WebPort);
+                ArmingResult arming;
+                if (string.IsNullOrEmpty(cli.Jnlp))
+                {
+                    Console.WriteLine("Arming the Java iKVM session...");
+                    arming = new BmcArmingClient().Arm(
+                        cli.Host, cli.User, password, cli.UseHttps, cli.WebPort);
+                }
+                else
+                {
+                    Console.WriteLine("Loading an existing JNLP session...");
+                    arming = BmcArmingClient.ParseJnlp(File.ReadAllText(cli.Jnlp));
+                }
                 password = null;
 
                 var connection = new KvmConnectionOptions
@@ -89,8 +107,15 @@ namespace ATENtion.Capture
                     UseTls = arming.UseTls,
                     KvmUsername = arming.KvmUsername,
                     KvmPassword = arming.KvmPassword,
-                    ClientCertificate = arming.UseTls ? LoadClientCertificate(cli.ClientPfx) : null
+                    ClientCertificate = arming.UseTls ? LoadClientCertificate(cli.ClientPfx) : null,
+                    VirtualMediaPort = arming.VirtualMediaPort > 0 ? arming.VirtualMediaPort : 623,
+                    VirtualMediaUseTls = arming.UseTls,
+                    VirtualMediaEnabled = arming.VirtualMediaEnabled != 0,
                 };
+
+                if (!string.IsNullOrEmpty(cli.MountIso))
+                    return RunVirtualMediaProbe(connection, cli.MountIso, cli.TimeoutSeconds,
+                        cli.VirtualMediaHost, cli.VirtualMediaPort, cli.VirtualMediaPlain);
 
                 Exception fault = null;
                 byte[] screenshot = null;
@@ -170,6 +195,11 @@ namespace ATENtion.Capture
                 else if (arg == "--user") result.User = RequireValue(args, ref i, arg);
                 else if (arg == "--output") result.Output = RequireValue(args, ref i, arg);
                 else if (arg == "--raw-output") result.RawOutput = RequireValue(args, ref i, arg);
+                else if (arg == "--mount-iso") result.MountIso = RequireValue(args, ref i, arg);
+                else if (arg == "--jnlp") result.Jnlp = RequireValue(args, ref i, arg);
+                else if (arg == "--vmedia-host") result.VirtualMediaHost = RequireValue(args, ref i, arg);
+                else if (arg == "--vmedia-port") result.VirtualMediaPort = ParsePositiveInt(RequireValue(args, ref i, arg), arg);
+                else if (arg == "--vmedia-plain") result.VirtualMediaPlain = true;
                 else if (arg == "--client-pfx") result.ClientPfx = RequireValue(args, ref i, arg);
                 else if (arg == "--timeout") result.TimeoutSeconds = ParsePositiveInt(RequireValue(args, ref i, arg), arg);
                 else if (arg == "--web-port") result.WebPort = ParsePositiveInt(RequireValue(args, ref i, arg), arg);
@@ -177,8 +207,63 @@ namespace ATENtion.Capture
             }
 
             if (string.IsNullOrWhiteSpace(result.Host)) throw new ArgumentException("--host is required.");
-            if (string.IsNullOrWhiteSpace(result.User)) throw new ArgumentException("--user is required.");
+            if (string.IsNullOrWhiteSpace(result.User) && string.IsNullOrEmpty(result.Jnlp))
+                throw new ArgumentException("--user is required unless --jnlp is used.");
+            if (!string.IsNullOrEmpty(result.MountIso) && !File.Exists(result.MountIso))
+                throw new ArgumentException("--mount-iso file does not exist.");
+            if (!string.IsNullOrEmpty(result.Jnlp) && !File.Exists(result.Jnlp))
+                throw new ArgumentException("--jnlp file does not exist.");
             return result;
+        }
+
+        private static int RunVirtualMediaProbe(KvmConnectionOptions connection, string imagePath, int seconds,
+                                                string endpointHost, int endpointPort, bool forcePlain)
+        {
+            if (!connection.VirtualMediaEnabled)
+                throw new InvalidOperationException("The armed BMC session does not advertise virtual media.");
+
+            using (var media = new VirtualMediaSession(new VirtualMediaOptions
+            {
+                Host = string.IsNullOrEmpty(endpointHost) ? connection.Host : endpointHost,
+                Port = endpointPort > 0 ? endpointPort : connection.VirtualMediaPort,
+                UseTls = forcePlain ? false : connection.VirtualMediaUseTls,
+                ClientCertificate = connection.ClientCertificate,
+                Username = connection.KvmUsername,
+                Password = connection.KvmPassword,
+                ImagePath = Path.GetFullPath(imagePath),
+            }))
+            {
+                Exception fault = null;
+                media.Faulted += (sender, ex) => fault = ex;
+                media.Open();
+                media.StartServing();
+                Console.WriteLine($"Mounted {Path.GetFileName(imagePath)} for {seconds}s; press Ctrl+C to stop early.");
+                using (var cancelled = new ManualResetEventSlim(false))
+                {
+                    ConsoleCancelEventHandler cancelHandler = (sender, args) =>
+                    {
+                        args.Cancel = true;
+                        cancelled.Set();
+                    };
+                    Console.CancelKeyPress += cancelHandler;
+                    try
+                    {
+                        DateTime deadline = DateTime.UtcNow.AddSeconds(seconds);
+                        while (DateTime.UtcNow < deadline && media.IsRunning &&
+                               fault == null && !cancelled.IsSet)
+                        {
+                            Thread.Sleep(100);
+                        }
+                    }
+                    finally
+                    {
+                        Console.CancelKeyPress -= cancelHandler;
+                    }
+                }
+                if (fault != null) throw new InvalidOperationException("Virtual-media session failed.", fault);
+                Console.WriteLine($"Virtual media served {media.CommandsServed} commands and {media.BytesServed:n0} bytes.");
+            }
+            return 0;
         }
 
         private static string RequireValue(string[] args, ref int index, string option)
@@ -276,14 +361,19 @@ namespace ATENtion.Capture
 
         private static void PrintUsage()
         {
-            Console.WriteLine("Log in to an ATEN iKVM console and save the first decoded frame.");
+            Console.WriteLine("Capture an ATEN iKVM frame or serve an ISO as virtual media.");
             Console.WriteLine();
             Console.WriteLine("Usage:");
-            Console.WriteLine("  ATENtion.Capture.exe --host HOST --user USER [options]");
+            Console.WriteLine("  ATENtion.Capture.exe --host HOST [--user USER] [options]");
             Console.WriteLine();
             Console.WriteLine("Options:");
             Console.WriteLine("  --output FILE       BMP screenshot path (default: timestamped beside exe)");
             Console.WriteLine("  --raw-output FILE   Also save the first raw ASPEED packet for offline analysis");
+            Console.WriteLine("  --mount-iso FILE    Mount an ISO for the timeout instead of taking a screenshot");
+            Console.WriteLine("  --jnlp FILE         Use an existing launch JNLP instead of web login");
+            Console.WriteLine("  --vmedia-host HOST  Override the virtual-media endpoint (diagnostics)");
+            Console.WriteLine("  --vmedia-port PORT  Override the virtual-media port (diagnostics)");
+            Console.WriteLine("  --vmedia-plain      Disable TLS only for the virtual-media endpoint");
             Console.WriteLine("  --timeout SECONDS   Capture timeout (default: 30)");
             Console.WriteLine("  --web-port PORT     BMC web port (default: 443 for HTTPS)");
             Console.WriteLine("  --http              Use HTTP for BMC web login");
