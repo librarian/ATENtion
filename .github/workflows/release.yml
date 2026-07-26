@@ -1,9 +1,9 @@
 name: Release
 
-# Build a Release and publish it as a GitHub Release whenever a version tag is pushed.
+# Build and publish release archives whenever a version tag is pushed.
 # Tag and push to trigger, for example:
-#   git tag v1.0.0
-#   git push origin v1.0.0
+#   git tag v1.0.7
+#   git push origin v1.0.7
 
 on:
   push:
@@ -13,7 +13,7 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  windows:
     runs-on: windows-latest
 
     steps:
@@ -28,17 +28,110 @@ jobs:
       - name: Build (Release)
         run: dotnet build ATENtion.slnx -c Release
 
-      - name: Package
+      - name: Package Windows GUI and CLI
         shell: pwsh
         run: |
-          $out = "src/ATENtion.App/bin/Release/net48"
-          $zip = "ATENtion-${{ github.ref_name }}-win.zip"
-          $files = Get-ChildItem $out -File | Where-Object { $_.Extension -ne '.pdb' }
-          Compress-Archive -Path $files.FullName -DestinationPath $zip -Force
-          "ZIP=$zip" >> $env:GITHUB_ENV
+          $stage = "release-win"
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          $outputs = @(
+            "src/ATENtion.App/bin/Release/net48",
+            "src/ATENtion.Capture/bin/Release/net48"
+          )
+          foreach ($out in $outputs) {
+            Get-ChildItem $out -File |
+              Where-Object { $_.Extension -ne '.pdb' } |
+              Copy-Item -Destination $stage -Force
+          }
+          $zip = "ATENtion-${{ github.ref_name }}-win-x64.zip"
+          Compress-Archive -Path "$stage/*" -DestinationPath $zip -Force
+
+      - name: Upload Windows archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-win-x64
+          path: ATENtion-${{ github.ref_name }}-win-x64.zip
+          if-no-files-found: error
+
+  portable-cli:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            rid: linux-x64
+            native: libaspeed_codec.so
+          - runner: macos-15-intel
+            rid: osx-x64
+            native: libaspeed_codec.dylib
+          - runner: macos-15
+            rid: osx-arm64
+            native: libaspeed_codec.dylib
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Build native ASPEED decoder (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cc -shared -fPIC -O2 -std=c11 \
+            -o src/ATENtion.Aspeed.Native/${{ matrix.native }} \
+            src/ATENtion.Aspeed.Native/decoder.c
+
+      - name: Build native ASPEED decoder (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cc -dynamiclib -O2 -std=c11 \
+            -o src/ATENtion.Aspeed.Native/${{ matrix.native }} \
+            src/ATENtion.Aspeed.Native/decoder.c
+
+      - name: Publish self-contained CLI
+        run: |
+          dotnet publish src/ATENtion.Capture/ATENtion.Capture.csproj \
+            -c Release -f net8.0 -r ${{ matrix.rid }} --self-contained true \
+            -p:DebugType=None -p:DebugSymbols=false
+          publish_dir="src/ATENtion.Capture/bin/Release/net8.0/${{ matrix.rid }}/publish"
+          cp "src/ATENtion.Aspeed.Native/${{ matrix.native }}" "$publish_dir/"
+          cp src/ATENtion.Aspeed.Native/LICENSE "$publish_dir/ASPEED-CODEC-LICENSE.txt"
+          "$publish_dir/ATENtion.Capture" --help
+          "$publish_dir/ATENtion.Capture" --check-native-decoder
+
+      - name: Package CLI
+        run: |
+          publish_dir="src/ATENtion.Capture/bin/Release/net8.0/${{ matrix.rid }}/publish"
+          archive="ATENtion-${{ github.ref_name }}-${{ matrix.rid }}.tar.gz"
+          tar -czf "$archive" -C "$publish_dir" .
+
+      - name: Upload CLI archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.rid }}
+          path: ATENtion-${{ github.ref_name }}-${{ matrix.rid }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: [ windows, portable-cli ]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download release archives
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
 
       - name: Create GitHub Release
-        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create ${{ github.ref_name }} $env:ZIP --title ${{ github.ref_name }} --generate-notes
+        run: >-
+          gh release create "${{ github.ref_name }}" release-assets/*
+          --repo "${{ github.repository }}"
+          --title "${{ github.ref_name }}"
+          --generate-notes

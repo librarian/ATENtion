@@ -1,8 +1,5 @@
 name: CI
 
-# Build and test on every push and pull request to main. The job runs on Windows
-# because the app targets .NET Framework 4.8 and WPF, which do not build on Linux.
-
 on:
   push:
     branches: [ main ]
@@ -11,14 +8,13 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  windows:
     runs-on: windows-latest
 
     steps:
       - name: Check out
         uses: actions/checkout@v4
 
-      # A recent SDK is required to build the .slnx solution format.
       - name: Set up .NET SDK
         uses: actions/setup-dotnet@v4
         with:
@@ -30,12 +26,66 @@ jobs:
       - name: Test
         run: dotnet test ATENtion.slnx -c Release --no-build
 
-      - name: Upload build
+      - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:
-          name: ATENtion
+          name: ATENtion-win
           path: |
             src/ATENtion.App/bin/Release/net48/ATENtion.exe
             src/ATENtion.App/bin/Release/net48/ATENtion.Core.dll
             src/ATENtion.App/bin/Release/net48/ATENtion.exe.config
+            src/ATENtion.Capture/bin/Release/net48/ATENtion.Capture.exe
           if-no-files-found: error
+
+  portable-cli:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            rid: linux-x64
+            native: libaspeed_codec.so
+          - runner: macos-15-intel
+            rid: osx-x64
+            native: libaspeed_codec.dylib
+          - runner: macos-15
+            rid: osx-arm64
+            native: libaspeed_codec.dylib
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Build native ASPEED decoder (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cc -shared -fPIC -O2 -std=c11 \
+            -o src/ATENtion.Aspeed.Native/${{ matrix.native }} \
+            src/ATENtion.Aspeed.Native/decoder.c
+
+      - name: Build native ASPEED decoder (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cc -dynamiclib -O2 -std=c11 \
+            -o src/ATENtion.Aspeed.Native/${{ matrix.native }} \
+            src/ATENtion.Aspeed.Native/decoder.c
+
+      - name: Test portable core
+        run: dotnet test tests/ATENtion.Tests/ATENtion.Tests.csproj -c Release -f net8.0
+
+      - name: Publish and smoke-test CLI
+        run: |
+          dotnet publish src/ATENtion.Capture/ATENtion.Capture.csproj \
+            -c Release -f net8.0 -r ${{ matrix.rid }} --self-contained true \
+            -p:DebugType=None -p:DebugSymbols=false
+          publish_dir="src/ATENtion.Capture/bin/Release/net8.0/${{ matrix.rid }}/publish"
+          cp "src/ATENtion.Aspeed.Native/${{ matrix.native }}" "$publish_dir/"
+          "$publish_dir/ATENtion.Capture" --help
+          "$publish_dir/ATENtion.Capture" --check-native-decoder

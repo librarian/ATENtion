@@ -5,6 +5,7 @@ using System.Security.Cryptography.X509Certificates;
 using System.Threading;
 using ATENtion.Core.Diagnostics;
 using ATENtion.Core.Net;
+using ATENtion.Core.Video;
 
 namespace ATENtion.Capture
 {
@@ -21,6 +22,7 @@ namespace ATENtion.Capture
             public string VirtualMediaHost;
             public int VirtualMediaPort;
             public bool VirtualMediaPlain;
+            public bool CheckNativeDecoder;
             public string ClientPfx;
             public int TimeoutSeconds = 30;
             public int WebPort;
@@ -45,6 +47,21 @@ namespace ATENtion.Capture
             {
                 PrintUsage();
                 return 0;
+            }
+
+            if (cli.CheckNativeDecoder)
+            {
+                try
+                {
+                    AspeedNativeDecoder.VerifyAvailable();
+                    Console.WriteLine("Native ASPEED decoder loaded successfully.");
+                    return 0;
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine("Native ASPEED decoder check failed: " + ex.Message);
+                    return 1;
+                }
             }
 
             string baseDirectory = AppDomain.CurrentDomain.BaseDirectory;
@@ -191,6 +208,7 @@ namespace ATENtion.Capture
                 string arg = args[i];
                 if (arg == "--help" || arg == "-h") return null;
                 if (arg == "--http") { result.UseHttps = false; continue; }
+                if (arg == "--check-native-decoder") { result.CheckNativeDecoder = true; continue; }
                 if (arg == "--host") result.Host = RequireValue(args, ref i, arg);
                 else if (arg == "--user") result.User = RequireValue(args, ref i, arg);
                 else if (arg == "--output") result.Output = RequireValue(args, ref i, arg);
@@ -206,6 +224,7 @@ namespace ATENtion.Capture
                 else throw new ArgumentException("Unknown argument: " + arg);
             }
 
+            if (result.CheckNativeDecoder) return result;
             if (string.IsNullOrWhiteSpace(result.Host)) throw new ArgumentException("--host is required.");
             if (string.IsNullOrWhiteSpace(result.User) && string.IsNullOrEmpty(result.Jnlp))
                 throw new ArgumentException("--user is required unless --jnlp is used.");
@@ -361,10 +380,13 @@ namespace ATENtion.Capture
 
         private static void PrintUsage()
         {
+            string executable = Path.DirectorySeparatorChar == '\\'
+                ? "ATENtion.Capture.exe"
+                : "ATENtion.Capture";
             Console.WriteLine("Capture an ATEN iKVM frame or serve an ISO as virtual media.");
             Console.WriteLine();
             Console.WriteLine("Usage:");
-            Console.WriteLine("  ATENtion.Capture.exe --host HOST [--user USER] [options]");
+            Console.WriteLine($"  {executable} --host HOST [--user USER] [options]");
             Console.WriteLine();
             Console.WriteLine("Options:");
             Console.WriteLine("  --output FILE       BMP screenshot path (default: timestamped beside exe)");
@@ -378,6 +400,7 @@ namespace ATENtion.Capture
             Console.WriteLine("  --web-port PORT     BMC web port (default: 443 for HTTPS)");
             Console.WriteLine("  --http              Use HTTP for BMC web login");
             Console.WriteLine("  --client-pfx FILE   Override the embedded mutual-TLS client certificate");
+            Console.WriteLine("  --check-native-decoder  Verify the platform video decoder and exit");
             Console.WriteLine("  --help              Show this help");
             Console.WriteLine();
             Console.WriteLine("The BMC password is prompted securely and is never accepted on the command line.");
