@@ -20,11 +20,19 @@ jobs:
         with:
           dotnet-version: '9.0.x'
 
+      - name: Build native ASPEED decoder
+        shell: pwsh
+        run: ./src/ATENtion.Aspeed.Native/build-windows.ps1
+
       - name: Build (Release)
         run: dotnet build ATENtion.slnx -c Release
 
       - name: Test
         run: dotnet test ATENtion.slnx -c Release --no-build
+
+      - name: Smoke-test native ASPEED decoder
+        shell: pwsh
+        run: ./src/ATENtion.Capture/bin/Release/net48/ATENtion.Capture.exe --check-native-decoder
 
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
@@ -34,6 +42,8 @@ jobs:
             src/ATENtion.App/bin/Release/net48/ATENtion.exe
             src/ATENtion.App/bin/Release/net48/ATENtion.Core.dll
             src/ATENtion.App/bin/Release/net48/ATENtion.exe.config
+            src/ATENtion.App/bin/Release/net48/aspeed_codec.dll
+            src/ATENtion.App/bin/Release/net48/ASPEED-CODEC-LICENSE.txt
             src/ATENtion.Capture/bin/Release/net48/ATENtion.Capture.exe
           if-no-files-found: error
 

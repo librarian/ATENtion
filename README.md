@@ -66,9 +66,11 @@ across the X9, X10, and X11 generations should work, but remain untested.
 
 ## Build
 
-With the .NET SDK:
+Windows source builds require LLVM/Clang for the native ASPEED decoder. Build
+the decoder first, then build the .NET solution:
 
-```
+```powershell
+./src/ATENtion.Aspeed.Native/build-windows.ps1
 dotnet build ATENtion.slnx -c Release
 ```
 

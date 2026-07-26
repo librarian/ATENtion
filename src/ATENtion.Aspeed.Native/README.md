@@ -15,11 +15,11 @@ repository says GPL-3.0-or-later, while the repository license and source-file
 headers explicitly state MPL-2.0; this copy follows the license attached to the
 source files.
 
-The DLL is built reproducibly for Windows x64 with llvm-mingw 20260616:
+Windows builds require LLVM/Clang. The checked-in build script creates the x64
+DLL with reproducible linker output:
 
-```text
-x86_64-w64-mingw32-gcc -shared -O2 -std=c11 -s \
-  -Wl,--no-insert-timestamp -o aspeed_codec.dll decoder.c
+```powershell
+./build-windows.ps1
 ```
 
 Linux and macOS builds use the system C compiler:
@@ -29,7 +29,10 @@ cc -shared -fPIC -O2 -std=c11 -o libaspeed_codec.so decoder.c
 cc -dynamiclib -O2 -std=c11 -o libaspeed_codec.dylib decoder.c
 ```
 
+Generated `.dll`, `.so`, and `.dylib` files are build artifacts and are not
+tracked in Git.
+
 Do not build this source with Zig 0.15.1: that compiler produced a DLL which
 decoded only scattered macroblocks for valid AST2500 full frames. The same
 captured packet decoded correctly with ASPEED's JavaScript reference decoder,
-the Linux C build, and the llvm-mingw Windows build.
+the Linux C build, and the LLVM/Clang Windows build.

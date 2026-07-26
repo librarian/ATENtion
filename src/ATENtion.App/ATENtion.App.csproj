@@ -55,4 +55,9 @@
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <Target Name="RequireAspeedNativeDecoder" BeforeTargets="PrepareForBuild"
+          Condition="'$(OS)' == 'Windows_NT' and !Exists('..\ATENtion.Aspeed.Native\aspeed_codec.dll')">
+    <Error Text="The native ASPEED decoder has not been built. Run src\ATENtion.Aspeed.Native\build-windows.ps1 first." />
+  </Target>
+
 </Project>

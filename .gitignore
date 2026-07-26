@@ -32,6 +32,7 @@ user.config
 # Local diagnostic and release artifacts.
 captures/
 dist/
+src/ATENtion.Aspeed.Native/*.dll
 src/ATENtion.Aspeed.Native/*.pdb
 src/ATENtion.Aspeed.Native/*.lib
 src/ATENtion.Aspeed.Native/*.so

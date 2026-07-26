@@ -25,8 +25,16 @@ jobs:
         with:
           dotnet-version: '9.0.x'
 
+      - name: Build native ASPEED decoder
+        shell: pwsh
+        run: ./src/ATENtion.Aspeed.Native/build-windows.ps1
+
       - name: Build (Release)
         run: dotnet build ATENtion.slnx -c Release
+
+      - name: Smoke-test native ASPEED decoder
+        shell: pwsh
+        run: ./src/ATENtion.Capture/bin/Release/net48/ATENtion.Capture.exe --check-native-decoder
 
       - name: Package Windows GUI and CLI
         shell: pwsh
