@@ -75,28 +75,33 @@ dotnet build ATENtion.slnx -c Release
 The application is produced at `src/ATENtion.App/bin/Release/net48/ATENtion.exe`.
 Visual Studio 2022 also opens and builds `ATENtion.slnx` directly.
 
-The WPF viewer is Windows-only. Tagged releases also contain self-contained
+The WPF viewer is Windows-only. Tagged releases also contain self-contained, single-file
 `ATENtion.Capture` CLI archives for Linux x64, macOS Intel, and macOS Apple Silicon.
-To build the portable CLI locally, first compile the ASPEED decoder for the host and
-then publish the .NET 8 target:
+Each archive contains only the executable and the ASPEED decoder license. To build the
+portable CLI locally, first compile the ASPEED decoder for the host and then publish the
+.NET 8 target:
 
 ```bash
 # Linux
 cc -shared -fPIC -O2 -std=c11 \
   -o src/ATENtion.Aspeed.Native/libaspeed_codec.so \
   src/ATENtion.Aspeed.Native/decoder.c
-dotnet publish src/ATENtion.Capture -c Release -f net8.0 -r linux-x64 --self-contained
+dotnet publish src/ATENtion.Capture -c Release -f net8.0 -r linux-x64 --self-contained \
+  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true \
+  -p:AspeedNativeLibrary="$PWD/src/ATENtion.Aspeed.Native/libaspeed_codec.so" \
+  -p:AspeedNativeLibraryName=libaspeed_codec.so
 
 # macOS
 cc -dynamiclib -O2 -std=c11 \
   -o src/ATENtion.Aspeed.Native/libaspeed_codec.dylib \
   src/ATENtion.Aspeed.Native/decoder.c
-dotnet publish src/ATENtion.Capture -c Release -f net8.0 -r osx-arm64 --self-contained
+dotnet publish src/ATENtion.Capture -c Release -f net8.0 -r osx-arm64 --self-contained \
+  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true \
+  -p:AspeedNativeLibrary="$PWD/src/ATENtion.Aspeed.Native/libaspeed_codec.dylib" \
+  -p:AspeedNativeLibraryName=libaspeed_codec.dylib
 # Use -r osx-x64 instead on an Intel Mac.
 ```
 
-Copy the native library into the publish directory beside the `ATENtion.Capture`
-executable. The release workflow performs this step automatically.
 Run `ATENtion.Capture --check-native-decoder` to verify that the platform library
 can be loaded before connecting to a BMC.
 

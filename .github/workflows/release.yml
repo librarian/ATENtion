@@ -2,8 +2,8 @@ name: Release
 
 # Build and publish release archives whenever a version tag is pushed.
 # Tag and push to trigger, for example:
-#   git tag v1.0.8
-#   git push origin v1.0.8
+#   git tag v1.0.9
+#   git push origin v1.0.9
 
 on:
   push:
@@ -94,14 +94,19 @@ jobs:
 
       - name: Publish self-contained CLI
         run: |
+          native_path="${{ github.workspace }}/src/ATENtion.Aspeed.Native/${{ matrix.native }}"
           dotnet publish src/ATENtion.Capture/ATENtion.Capture.csproj \
             -c Release -f net8.0 -r ${{ matrix.rid }} --self-contained true \
-            -p:DebugType=None -p:DebugSymbols=false
+            -p:PublishSingleFile=true \
+            -p:IncludeNativeLibrariesForSelfExtract=true \
+            -p:DebugType=None -p:DebugSymbols=false \
+            -p:AspeedNativeLibrary="$native_path" \
+            -p:AspeedNativeLibraryName=${{ matrix.native }}
           publish_dir="src/ATENtion.Capture/bin/Release/net8.0/${{ matrix.rid }}/publish"
-          cp "src/ATENtion.Aspeed.Native/${{ matrix.native }}" "$publish_dir/"
-          cp src/ATENtion.Aspeed.Native/LICENSE "$publish_dir/ASPEED-CODEC-LICENSE.txt"
           "$publish_dir/ATENtion.Capture" --help
           "$publish_dir/ATENtion.Capture" --check-native-decoder
+          test -f "$publish_dir/ASPEED-CODEC-LICENSE.txt"
+          test "$(find "$publish_dir" -maxdepth 1 -type f | wc -l | xargs)" -eq 2
 
       - name: Package CLI
         run: |
@@ -127,11 +132,15 @@ jobs:
           path: release-assets
           merge-multiple: true
 
-      - name: Create GitHub Release
+      - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release create "${{ github.ref_name }}" release-assets/*
-          --repo "${{ github.repository }}"
-          --title "${{ github.ref_name }}"
-          --generate-notes
+        run: |
+          tag="${{ github.ref_name }}"
+          repo="${{ github.repository }}"
+          if gh release view "$tag" --repo "$repo" > /dev/null 2>&1; then
+            gh release upload "$tag" release-assets/* --clobber --repo "$repo"
+          else
+            gh release create "$tag" release-assets/* \
+              --repo "$repo" --title "$tag" --generate-notes
+          fi

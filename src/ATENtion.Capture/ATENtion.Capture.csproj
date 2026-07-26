@@ -7,7 +7,7 @@
     <Nullable>disable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
     <AssemblyName>ATENtion.Capture</AssemblyName>
-    <Version>1.0.8</Version>
+    <Version>1.0.9</Version>
   </PropertyGroup>
 
   <ItemGroup>
@@ -27,7 +27,15 @@
 
   <ItemGroup>
     <None Include="..\ATENtion.Aspeed.Native\LICENSE" Link="ASPEED-CODEC-LICENSE.txt"
-          CopyToOutputDirectory="PreserveNewest" />
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest"
+          ExcludeFromSingleFile="true" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(AspeedNativeLibrary)' != ''">
+    <Content Include="$(AspeedNativeLibrary)" Link="$(AspeedNativeLibraryName)"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
