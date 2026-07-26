@@ -62,8 +62,8 @@ namespace ATENtion.Core.Storage
     /// </para>
     /// <para>
     /// The INQUIRY response is byte-for-byte the native client's, so the host enumerates the same
-    /// device it would see under the original viewer (vendor "ATEN", product "Virtual CDROM",
-    /// revision "YS0J").
+    /// device it would see under the original viewer (vendor "IPMI", product "Virtual CDROM",
+    /// revision "3000").
     /// </para>
     /// <para>
     /// DEPENDENCIES - Reads sectors from an <see cref="IsoBlockSource"/>. The command blocks and
@@ -78,7 +78,7 @@ namespace ATENtion.Core.Storage
     /// <para>
     /// PROVENANCE - Command set and the verbatim INQUIRY data from the native CD command processor
     /// iKVM64.dll FUN_180004c80. The command repertoire is PORTED
-    /// FAITHFULLY. The end-to-end attach and boot of an ISO is not yet confirmed against hardware.
+    /// FAITHFULLY. VERIFIED LIVE through an AST2400 BMC as a Linux USB CD-ROM with ISO reads.
     /// </para>
     /// </remarks>
     public sealed class ScsiCdRomTarget
@@ -104,8 +104,14 @@ namespace ATENtion.Core.Storage
         private const byte READ_10 = 0x28;
         /// <summary>READ TOC/PMA/ATIP (0x43): the host reads the disc table of contents; a single data track.</summary>
         private const byte READ_TOC = 0x43;
-        /// <summary>GET CONFIGURATION (0x46): MMC feature query; not implemented (CHECK CONDITION).</summary>
+        /// <summary>GET CONFIGURATION (0x46): reports the vendor target's MMC feature set.</summary>
         private const byte GET_CONFIGURATION = 0x46;
+        /// <summary>GET EVENT STATUS NOTIFICATION (0x4A): reports media present and unchanged.</summary>
+        private const byte GET_EVENT_STATUS = 0x4A;
+        /// <summary>READ DISC INFORMATION (0x51): reports a complete, finalized data disc.</summary>
+        private const byte READ_DISC_INFORMATION = 0x51;
+        /// <summary>READ TRACK INFORMATION (0x52): reports one data track spanning the ISO.</summary>
+        private const byte READ_TRACK_INFORMATION = 0x52;
         /// <summary>MODE SENSE(10) (0x5A): the host reads mode parameters; answered with a minimal header.</summary>
         private const byte MODE_SENSE_10 = 0x5A;
         /// <summary>READ(12) (0xA8): the host reads sectors; 32-bit LBA, 32-bit transfer length.</summary>
@@ -128,16 +134,16 @@ namespace ATENtion.Core.Storage
         /// </summary>
         /// <remarks>
         /// Peripheral device type 0x05 (CD/DVD), removable medium (RMB set in byte 1), vendor
-        /// identification "ATEN", product identification "Virtual CDROM", product revision "YS0J".
+        /// identification "IPMI", product identification "Virtual CDROM", product revision "3000".
         /// Returning the original viewer's exact bytes makes the host enumerate the identical device.
         /// </remarks>
         public static readonly byte[] InquiryData =
         {
             0x05, 0x80, 0x00, 0x21, 0x1F, 0x00, 0x00, 0x00,
-            (byte)'A', (byte)'T', (byte)'E', (byte)'N', (byte)' ', (byte)' ', (byte)' ', (byte)' ',
+            (byte)'I', (byte)'P', (byte)'M', (byte)'I', (byte)' ', (byte)' ', (byte)' ', (byte)' ',
             (byte)'V', (byte)'i', (byte)'r', (byte)'t', (byte)'u', (byte)'a', (byte)'l', (byte)' ',
             (byte)'C', (byte)'D', (byte)'R', (byte)'O', (byte)'M', (byte)' ', (byte)' ', (byte)' ',
-            (byte)'Y', (byte)'S', (byte)'0', (byte)'J',
+            (byte)'3', (byte)'0', (byte)'0', (byte)'0',
         };
 
         private readonly IsoBlockSource _iso;
@@ -206,6 +212,18 @@ namespace ATENtion.Core.Storage
                 case READ_TOC:
                     return ScsiResult.Good(Cap(BuildReadToc(cdb), alloc));
 
+                case GET_CONFIGURATION:
+                    return ScsiResult.Good(Cap(BuildGetConfiguration(cdb), alloc));
+
+                case GET_EVENT_STATUS:
+                    return ScsiResult.Good(Cap(new byte[] { 0x00, 0x06, 0x04, 0x5E, 0x00, 0x02, 0x00, 0x00 }, alloc));
+
+                case READ_DISC_INFORMATION:
+                    return ScsiResult.Good(Cap(BuildDiscInformation(), alloc));
+
+                case READ_TRACK_INFORMATION:
+                    return ScsiResult.Good(Cap(BuildTrackInformation(), alloc));
+
                 default:
                     // Unsupported command. Report CHECK CONDITION and record ILLEGAL REQUEST /
                     // INVALID COMMAND OPERATION CODE for the host's following REQUEST SENSE.
@@ -266,10 +284,48 @@ namespace ATENtion.Core.Storage
             return new byte[] { 0x03, 0x00, 0x00, 0x00 };
         }
 
-        // MODE SENSE(10) response: an 8-byte mode parameter header only.
+        // MODE SENSE(10) response emitted by the vendor target for page 0x2A.
         private static byte[] BuildModeSense10()
         {
-            return new byte[] { 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+            return new byte[]
+            {
+                0x00, 0x24, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x2A, 0x1C, 0x3F, 0x00, 0x71, 0x77, 0x29, 0x23,
+                0x1B, 0x90, 0x01, 0x00, 0x00, 0xC6, 0x1B, 0x90,
+                0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            };
+        }
+
+        private static byte[] BuildGetConfiguration(byte[] cdb)
+        {
+            int startingFeature = ReadBe16(cdb, 2);
+            if (startingFeature == 0x28)
+                return Hex("0000004c00000008002a000400010000");
+            if (startingFeature == 0x20)
+                return Hex("00000054000000080024000400000000002a000400010000");
+            return Hex(
+                "0000009800000008000003080010000000080100000103040000000200020704" +
+                "000000000003030429000000001001080000080000000100001d0100001e0504" +
+                "03000000001f0004000001000024000400000000002a000400010000002b0004" +
+                "00000000003b0004000000000100030001030004070001000104030001050704" +
+                "0000000001060004000000010107c00408000000010b0004");
+        }
+
+        private static byte[] BuildDiscInformation()
+        {
+            return Hex("00200e01010101200000000000000000ffffffffffffffff00000000000000000000");
+        }
+
+        private byte[] BuildTrackInformation()
+        {
+            byte[] data = Hex("001c0101000401000000000000000000000000000000000000000000");
+            uint blocks = (uint)Math.Min(_iso.TotalBlocks, uint.MaxValue);
+            data[24] = (byte)(blocks >> 24);
+            data[25] = (byte)(blocks >> 16);
+            data[26] = (byte)(blocks >> 8);
+            data[27] = (byte)blocks;
+            return data;
         }
 
         // READ TOC (format 0): a TOC header, a single track-1 (data) descriptor, and the lead-out.
@@ -341,5 +397,13 @@ namespace ATENtion.Core.Storage
 
         // Reads a big-endian 16-bit field from a CDB.
         private static int ReadBe16(byte[] b, int o) => (b[o] << 8) | b[o + 1];
+
+        private static byte[] Hex(string value)
+        {
+            var bytes = new byte[value.Length / 2];
+            for (int i = 0; i < bytes.Length; i++)
+                bytes[i] = Convert.ToByte(value.Substring(i * 2, 2), 16);
+            return bytes;
+        }
     }
 }

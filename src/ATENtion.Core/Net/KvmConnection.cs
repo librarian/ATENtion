@@ -28,6 +28,12 @@ namespace ATENtion.Core.Net
         public X509Certificate2 ClientCertificate { get; set; }
         /// <summary>The TCP connect timeout, in milliseconds.</summary>
         public int ConnectTimeoutMs { get; set; } = 10000;
+        /// <summary>The server-side virtual-media port from JNLP argument 10; normally 623.</summary>
+        public int VirtualMediaPort { get; set; } = 623;
+        /// <summary>True when virtual media uses the same direct mutual-TLS transport as KVM.</summary>
+        public bool VirtualMediaUseTls { get; set; }
+        /// <summary>True when the JNLP advertises virtual-media support in argument 11.</summary>
+        public bool VirtualMediaEnabled { get; set; }
 
         /// <summary>JNLP argument 1: the temporary ATEN username.</summary>
         public string KvmUsername { get; set; }

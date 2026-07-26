@@ -1,4 +1,6 @@
 using ATENtion.Core.Storage;
+using System.Security.Cryptography;
+using System.Text;
 using Xunit;
 
 namespace ATENtion.Tests
@@ -37,6 +39,36 @@ namespace ATENtion.Tests
             byte[] h = { 0x22, 0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00 };
             Assert.Equal(31, VmediaFraming.ReadPayloadLength(h));
             Assert.Equal((byte)0, VmediaFraming.ReadLun(h));
+        }
+
+        [Fact]
+        public void ReadCommandHeader_UsesEightByteServerLayout()
+        {
+            byte[] h = { 0x11, 0x02, 0x01, 0x00, 0x1F, 0, 0, 0 };
+            Assert.Equal(VmediaFraming.CommandMarker, h[0]);
+            Assert.Equal(31, VmediaFraming.ReadCommandPayloadLength(h));
+            Assert.Equal((byte)1, VmediaFraming.ReadCommandLun(h));
+        }
+
+        [Fact]
+        public void AttachRecord_SeparatesCredentialsAndAuthenticatesFirst226Bytes()
+        {
+            const string user = "123456789012345";
+            const string pass = "abc123==";
+            byte[] record = VmediaHandshake.BuildAttachRecord(user, pass, 0x7B2E0248);
+
+            Assert.Equal(VmediaHandshake.AttachRecordSize, record.Length);
+            Assert.Equal(user, Encoding.ASCII.GetString(record, 8, user.Length));
+            Assert.Equal(pass, Encoding.ASCII.GetString(record, 24, pass.Length));
+            Assert.Equal(new byte[] { 0x48, 0x02, 0x2E, 0x7B, 0x85, 0x03 },
+                new[] { record[44], record[45], record[46], record[47], record[48], record[49] });
+
+            byte[] expected;
+            using (var hmac = new HMACSHA1(Encoding.ASCII.GetBytes(user + pass)))
+                expected = hmac.ComputeHash(record, 0, VmediaHandshake.AuthenticatedSize);
+            var actual = new byte[20];
+            System.Array.Copy(record, VmediaHandshake.AuthenticatedSize, actual, 0, actual.Length);
+            Assert.Equal(expected, actual);
         }
 
         [Fact]

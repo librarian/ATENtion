@@ -4,8 +4,8 @@ namespace ATENtion.Core.Storage
 {
     /// <summary>
     /// Frames and parses the ATEN virtual-media wire protocol: USB Mass-Storage Bulk-Only Transport
-    /// (CBW/CSW with SCSI) tunnelled over plaintext TCP, each message prefixed by an eight-byte ATEN
-    /// header.
+    /// (CBW/CSW with SCSI) tunnelled over the virtual-media transport, each message prefixed by an
+    /// eight-byte ATEN header.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -52,6 +52,10 @@ namespace ATENtion.Core.Storage
         public const int CbwSize = 31;
         /// <summary>The fixed Command Status Wrapper length, in bytes.</summary>
         public const int CswSize = 13;
+        /// <summary>The server command header is marker/kind/LUN/flags/length, eight bytes total.</summary>
+        public const int CommandHeaderSize = 8;
+        /// <summary>The server marker byte carrying a USB command block.</summary>
+        public const byte CommandMarker = 0x11;
 
         /// <summary>The USB CBW signature, "USBC", little-endian.</summary>
         public const uint CbwSignature = 0x43425355;
@@ -88,6 +92,31 @@ namespace ATENtion.Core.Storage
         /// <param name="header">The frame header.</param>
         /// <returns>The logical unit number.</returns>
         public static byte ReadLun(byte[] header) => header[2];
+
+        /// <summary>Reads the LE payload length from a server's eight-byte command header.</summary>
+        public static int ReadCommandPayloadLength(byte[] header)
+        {
+            if (header == null || header.Length < CommandHeaderSize)
+                throw new ArgumentException("Command header must be 8 bytes.", nameof(header));
+            return header[4] | (header[5] << 8) | (header[6] << 16) | (header[7] << 24);
+        }
+
+        /// <summary>Reads the server command header's LUN byte.</summary>
+        public static byte ReadCommandLun(byte[] header)
+        {
+            if (header == null || header.Length < CommandHeaderSize)
+                throw new ArgumentException("Command header must be 8 bytes.", nameof(header));
+            return header[2];
+        }
+
+        /// <summary>Reads the big-endian message type from the first four bytes.</summary>
+        public static uint ReadType(byte[] header)
+        {
+            if (header == null || header.Length < 4)
+                throw new ArgumentException("Message prefix must be at least 4 bytes.", nameof(header));
+            return ((uint)header[0] << 24) | ((uint)header[1] << 16) |
+                   ((uint)header[2] << 8) | header[3];
+        }
 
         /// <summary>
         /// Builds the thirteen-byte Command Status Wrapper: the "USBS" signature, the echoed command
