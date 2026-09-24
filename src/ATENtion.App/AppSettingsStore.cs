@@ -54,8 +54,8 @@ namespace ATENtion.App
         public int ImageQuality = 11;
         /// <summary>True to let tabs that are not visible keep requesting video.</summary>
         public bool StreamAllTabs;
-        /// <summary>Seconds between the checks a hidden tab makes on its host; 0 for none.</summary>
-        public int HiddenTabCheckSeconds = 10;
+        /// <summary>Most frames a second a tab asks for; 0 for no limit.</summary>
+        public int FrameRateLimit;
         public string LastProfileId = "";
         /// <summary>Reopen the tabs that were open when the window closed.</summary>
         public bool ReopenTabs = true;
@@ -111,7 +111,7 @@ namespace ATENtion.App
                     new XAttribute("imageMode", ImageMode),
                     new XAttribute("imageQuality", ImageQuality),
                     new XAttribute("streamAllTabs", StreamAllTabs),
-                    new XAttribute("hiddenTabCheckSeconds", HiddenTabCheckSeconds),
+                    new XAttribute("frameRateLimit", FrameRateLimit),
                     new XAttribute("reopenTabs", ReopenTabs));
 
                 var tabs = new XElement("OpenTabs", new XAttribute("active", ActiveProfileId ?? ""));
@@ -180,7 +180,7 @@ namespace ATENtion.App
                     result.ImageMode = Int(ui, "imageMode", 444);
                     result.ImageQuality = Int(ui, "imageQuality", 11);
                     result.StreamAllTabs = Bool(ui, "streamAllTabs");
-                    result.HiddenTabCheckSeconds = Int(ui, "hiddenTabCheckSeconds", 10);
+                    result.FrameRateLimit = Int(ui, "frameRateLimit", 0);
                     result.ReopenTabs = Bool(ui, "reopenTabs", true);
                 }
 

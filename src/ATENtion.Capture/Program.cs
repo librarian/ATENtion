@@ -94,6 +94,7 @@ namespace ATENtion.Capture
             KvmLog.Message += Console.WriteLine;
 
             string password = null;
+            ArmingResult armingForLogout = null;
             if (string.IsNullOrEmpty(cli.Jnlp))
             {
                 Console.Write("BMC password: ");
@@ -115,6 +116,7 @@ namespace ATENtion.Capture
                     Console.WriteLine("Loading an existing JNLP session...");
                     arming = BmcArmingClient.ParseJnlp(File.ReadAllText(cli.Jnlp));
                 }
+                armingForLogout = arming;
                 password = null;
 
                 var connection = new KvmConnectionOptions
@@ -159,8 +161,7 @@ namespace ATENtion.Capture
                         }
                         completion.Set();
                     };
-                    try { session.Open(); }
-                    finally { BmcArmingClient.Logout(arming); }   // only needed until the handshake
+                    session.Open();
                     session.StartPump();
 
                     Console.WriteLine($"Connected. Waiting up to {cli.TimeoutSeconds}s for a decoded video frame...");
@@ -197,6 +198,9 @@ namespace ATENtion.Capture
             finally
             {
                 password = null;
+                // Only once the console is closed: the BMC treats a logout as the end of the console
+                // it armed. A no-op for a JNLP session, which has no web login.
+                BmcArmingClient.Logout(armingForLogout);
             }
         }
 
@@ -256,8 +260,7 @@ namespace ATENtion.Capture
             {
                 Exception fault = null;
                 media.Faulted += (sender, ex) => fault = ex;
-                try { media.Open(); }
-                finally { BmcArmingClient.Logout(arming); }
+                media.Open();
                 media.StartServing();
                 Console.WriteLine($"Mounted {Path.GetFileName(imagePath)} for {seconds}s; press Ctrl+C to stop early.");
                 using (var cancelled = new ManualResetEventSlim(false))

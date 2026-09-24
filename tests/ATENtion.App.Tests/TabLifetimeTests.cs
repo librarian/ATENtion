@@ -96,3 +96,42 @@ namespace ATENtion.App.Tests
         }
     }
 }
+
+namespace ATENtion.App.Tests
+{
+    /// <summary>The power glyph prefers the BMC's power report to the video signal.</summary>
+    public class HostPowerGlyphTests
+    {
+        [Theory]
+        [InlineData(HostPowerState.On, VideoSignalState.Absent, true)]      // on with no picture: now green
+        [InlineData(HostPowerState.On, VideoSignalState.Present, true)]
+        [InlineData(HostPowerState.Off, VideoSignalState.Present, false)]   // the report wins
+        [InlineData(HostPowerState.Unknown, VideoSignalState.Present, true)] // no report: a picture proves on
+        [InlineData(HostPowerState.Unknown, VideoSignalState.Absent, false)]
+        [InlineData(HostPowerState.Unknown, VideoSignalState.Unknown, false)]
+        public void The_Glyph_Is_Green_Only_When_The_Host_Is_Known_To_Be_On(
+            HostPowerState power, VideoSignalState signal, bool on)
+        {
+            Assert.Equal(on, PowerStatus.IsOn(power, signal));
+        }
+
+        [Fact]
+        public void The_Tooltip_Says_What_The_BMC_Reported()
+        {
+            Assert.Equal("Host on", PowerStatus.Tip(HostPowerState.On, VideoSignalState.Present, null));
+            Assert.StartsWith("Host on - no video signal", PowerStatus.Tip(HostPowerState.On, VideoSignalState.Absent, null));
+            Assert.Equal("Host off (checked 4s ago)",
+                PowerStatus.Tip(HostPowerState.Off, VideoSignalState.Absent, TimeSpan.FromSeconds(4.2)));
+            // Without a report, the signal-based wording as before.
+            Assert.Equal(PowerStatus.Tip(VideoSignalState.Absent, null),
+                PowerStatus.Tip(HostPowerState.Unknown, VideoSignalState.Absent, null));
+        }
+
+        [Fact]
+        public void A_Dropped_Link_Shows_Nothing_Known()
+        {
+            Assert.Equal(HostPowerState.Unknown, PowerStatus.Displayed(true, false, HostPowerState.On));
+            Assert.Equal(HostPowerState.On, PowerStatus.Displayed(true, true, HostPowerState.On));
+        }
+    }
+}

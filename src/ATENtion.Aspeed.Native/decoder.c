@@ -88,6 +88,11 @@ static uint32_t in_buf_index;
 // caller's buffer: a truncated or malformed packet then decodes as garbage, not as an over-read.
 static uint32_t in_buf_words;
 
+// One byte per macroblock, set when the decode writes that block, so the caller can repaint only
+// what changed. NULL when the caller does not track blocks.
+static unsigned char* block_map;
+static int block_map_len;
+
 // how many bits of 32-bit data pointed by 'in_buf_index' is not skipped yet
 static int newbits;
 // current/next 32-bit input data
@@ -562,6 +567,14 @@ static SHORT GetBits(BYTE bits)
     return signed_wordvalue;
 }
 
+static void MarkBlock(int mbx, int mby)
+{
+    int i;
+    if (block_map == NULL) return;
+    i = mby * mbwidth + mbx;
+    if (i >= 0 && i < block_map_len) block_map[i] = 1;
+}
+
 static void YUVToRGB(
     int mbx, int mby,
     unsigned char* pYCbCr, //in, Y: 256 or 64 bytes; Cb: 64 bytes; Cr: 64 bytes
@@ -576,6 +589,7 @@ static void YUVToRGB(
     WORD pixel_x, pixel_y;
     WORD tmp_x, tmp_y;
 
+    MarkBlock(mbx, mby);
     if (mode420 == 0) {
         py = pYCbCr;
         pcb = pYCbCr + 64;
@@ -652,6 +666,7 @@ static void YUVToRGBPass2(
         pr_dbg("pass2 not supported in yuv420\n");
         return;
     }
+    MarkBlock(mbx, mby);
 
     py = pYCbCr;
     pcb = pYCbCr + 64;
@@ -1177,6 +1192,22 @@ ASPEED_EXPORT void aspeed_decode_ctx(void* ctx, uint32_t* _in_buf, int _len, uns
     c->selector = selector; c->advance_selector = advance_selector; c->first_frame = first_frame;
     memcpy(c->QT, QT, sizeof(QT));
     yuv_buf = saved_yuv; selector = saved_sel; advance_selector = saved_adv; first_frame = saved_first;
+}
+
+/*
+ * As aspeed_decode_ctx, and also records which macroblocks the frame wrote: map receives one byte
+ * per block, row-major, with blocks 16 pixels square in 4:2:0 and 8 in 4:4:4. The caller clears it.
+ * An incremental frame on a still screen writes few or none, so only those need repainting.
+ */
+ASPEED_EXPORT void aspeed_decode_ctx_map(void* ctx, uint32_t* _in_buf, int _len, unsigned char* _out_buf,
+    int _width, int _height, unsigned _mode420, unsigned _sel, unsigned _adv_sel,
+    unsigned char* map, int map_len)
+{
+    block_map = map;
+    block_map_len = map_len;
+    aspeed_decode_ctx(ctx, _in_buf, _len, _out_buf, _width, _height, _mode420, _sel, _adv_sel);
+    block_map = NULL;
+    block_map_len = 0;
 }
 
 ASPEED_EXPORT void aspeed_decode(uint32_t* _in_buf, int _len, unsigned char* _out_buf, int _width, int _height,

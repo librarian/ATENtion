@@ -46,6 +46,15 @@ namespace ATENtion.App
         public VirtualMediaSession Vmedia;
         public EventHandler<Exception> VmFaulted;
         public EventHandler VmClosed;
+        // The session whose console-session list KnownSessions came from, and that list; null until
+        // the first list arrives. Used to announce users joining and leaving.
+        internal KvmVideoSession SessionListOwner;
+        internal IReadOnlyList<string> KnownSessions;
+
+        // The BMC notice last reported for NoticeOwner, so each is shown once.
+        internal KvmVideoSession NoticeOwner;
+        internal PrivilegeRecordType? ShownNotice;
+
         /// <summary>True while an ISO is attaching in the background.</summary>
         public bool Mounting;
         /// <summary>Moves on whenever media is cleared, so a mount that finishes afterwards is dropped.</summary>
@@ -105,23 +114,24 @@ namespace ATENtion.App
         // Throughput bookkeeping for the status line.
         public long LastFrames, LastBytes, LastFps, LastRateBytes;
 
-        private VideoSignalState _power = VideoSignalState.Unknown;
+        private bool _powerOn;
         private string _powerTip = PowerStatus.Tip(VideoSignalState.Unknown, null);
 
         /// <summary>Host state as far as the video signal reveals it.</summary>
-        public VideoSignalState Power => _power;
+        public bool PowerOn => _powerOn;
 
         /// <summary>Sets the glyph's state and how long ago it was confirmed.</summary>
         /// <param name="checkedAgo">Null while the tab streams; the age of the last check while paused.</param>
-        public void UpdatePower(VideoSignalState state, TimeSpan? checkedAgo)
+        public void UpdatePower(HostPowerState power, VideoSignalState signal, TimeSpan? checkedAgo)
         {
-            if (_power != state)
+            bool on = PowerStatus.IsOn(power, signal);
+            if (_powerOn != on)
             {
-                _power = state;
-                Raise(nameof(Power));
+                _powerOn = on;
+                Raise(nameof(PowerOn));
                 Raise(nameof(PowerBrush));
             }
-            string tip = PowerStatus.Tip(state, checkedAgo);
+            string tip = PowerStatus.Tip(power, signal, checkedAgo);
             if (tip != _powerTip)
             {
                 _powerTip = tip;
@@ -135,7 +145,7 @@ namespace ATENtion.App
         /// but equally matches one running without video output, so red would overstate it.
         /// </remarks>
         public Brush PowerBrush =>
-            _power == VideoSignalState.Present ? StatusColors.Controlling : PowerUnknownBrush;
+            _powerOn ? StatusColors.Controlling : PowerUnknownBrush;
 
         public string PowerTip => _powerTip;
 
@@ -207,8 +217,38 @@ namespace ATENtion.App
 
             var session = Session;
             Session = null;
-            if (session != null) DisposeInBackground(session);
+            EndSession(session, WebLogin);
+            WebLogin = null;
             LiveConnected = false;
+        }
+
+        /// <summary>The BMC web login that armed <see cref="Session"/>, or null for a manual token.</summary>
+        internal ArmingResult WebLogin;
+
+        /// <summary>Closes a console session, then the web login that armed it, off the UI thread.</summary>
+        /// <remarks>
+        /// The BMC ties a console to the web login that armed it: logging out tells it the console
+        /// has ended, and the vendor viewer closes when told so. The login is therefore kept for as
+        /// long as the console runs and closed afterwards, so reconnects do not leave web sessions
+        /// behind. A mounted disc is unaffected: tested on an X10 board, it kept serving after the
+        /// login that armed it was logged out.
+        /// </remarks>
+        internal static void EndSession(KvmVideoSession session, ArmingResult login)
+        {
+            if (session == null && login == null) return;
+            DisposeInBackground(new Ending(session, login));
+        }
+
+        private sealed class Ending : IDisposable
+        {
+            private readonly KvmVideoSession _session;
+            private readonly ArmingResult _login;
+            public Ending(KvmVideoSession session, ArmingResult login) { _session = session; _login = login; }
+            public void Dispose()
+            {
+                try { _session?.Dispose(); } catch { }
+                BmcArmingClient.Logout(_login);
+            }
         }
 
         // Every session disposal still running, so the window can wait for them briefly on exit.

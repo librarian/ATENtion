@@ -191,38 +191,44 @@ namespace ATENtion.App
         /// <summary>Sets whether a session streams or only checks in, from the UI thread.</summary>
         private void ApplyStreaming(SessionContext ctx, KvmVideoSession session)
         {
-            session.PausedCheckSeconds = _pausedCheckSeconds;
+            session.PausedCheckSeconds = HiddenTabCheckSeconds;
+            session.MinFrameIntervalMs = _frameRateLimit > 0 ? 1000 / _frameRateLimit : 0;
             session.VideoPaused = !StreamAllTabsItem.IsChecked && !ReferenceEquals(ctx, _ctx);
         }
 
-        // ---- hidden-tab checks ----
+        /// <summary>Seconds between the checks a hidden tab makes on its host.</summary>
+        /// <remarks>
+        /// A few bytes on a BMC that reports host status, a full frame on one that does not, so the
+        /// glyph stays current and a dropped link is noticed.
+        /// </remarks>
+        private const int HiddenTabCheckSeconds = 10;
 
-        /// <summary>Seconds between the checks a hidden tab makes on its host. 0 turns them off.</summary>
-        private int _pausedCheckSeconds = 10;
+        // ---- frame rate limit ----
 
-        private IEnumerable<KeyValuePair<int, MenuItem>> PausedCheckItems()
+        /// <summary>Most frames a second a tab asks for; 0 for no limit.</summary>
+        private int _frameRateLimit;
+
+        private IEnumerable<KeyValuePair<int, MenuItem>> FrameRateItems()
         {
-            yield return new KeyValuePair<int, MenuItem>(5, Check5Item);
-            yield return new KeyValuePair<int, MenuItem>(10, Check10Item);
-            yield return new KeyValuePair<int, MenuItem>(30, Check30Item);
-            yield return new KeyValuePair<int, MenuItem>(0, CheckOffItem);
+            yield return new KeyValuePair<int, MenuItem>(0, FpsUnlimitedItem);
+            yield return new KeyValuePair<int, MenuItem>(60, Fps60Item);
+            yield return new KeyValuePair<int, MenuItem>(30, Fps30Item);
+            yield return new KeyValuePair<int, MenuItem>(10, Fps10Item);
         }
 
-        private void OnPausedCheckInterval(object sender, RoutedEventArgs e)
+        private void OnFrameRateLimit(object sender, RoutedEventArgs e)
         {
-            if (!(sender is MenuItem item) || !int.TryParse(item.Tag as string, out int seconds)) return;
-            _pausedCheckSeconds = seconds;
-            SyncPausedCheckMenu();
+            if (!(sender is MenuItem item) || !int.TryParse(item.Tag as string, out int fps)) return;
+            _frameRateLimit = fps;
+            SyncFrameRateMenu();
             ApplyTabStreaming();
-            FlashStatus(seconds > 0
-                ? $"Hidden tabs: checked every {seconds}s."
-                : "Hidden tabs: not checked - their power glyph goes stale.");
+            FlashStatus(fps > 0 ? $"Frame rate limited to {fps} fps." : "Frame rate: unlimited.");
         }
 
-        private void SyncPausedCheckMenu()
+        private void SyncFrameRateMenu()
         {
-            foreach (var entry in PausedCheckItems())
-                entry.Value.IsChecked = entry.Key == _pausedCheckSeconds;
+            foreach (var entry in FrameRateItems())
+                entry.Value.IsChecked = entry.Key == _frameRateLimit;
         }
 
         /// <summary>Replays the newly selected session's state into the window's shared controls.</summary>
@@ -400,9 +406,8 @@ namespace ATENtion.App
                 ? ScreenInfoRequest.MaximumQuality : (byte)s.ImageQuality;
             ApplyDisplayPreference();
             StreamAllTabsItem.IsChecked = s.StreamAllTabs;
-            _pausedCheckSeconds = PausedCheckItems().Any(i => i.Key == s.HiddenTabCheckSeconds)
-                ? s.HiddenTabCheckSeconds : 10;
-            SyncPausedCheckMenu();
+            _frameRateLimit = FrameRateItems().Any(i => i.Key == s.FrameRateLimit) ? s.FrameRateLimit : 0;
+            SyncFrameRateMenu();
             ApplyTabStreaming();
             OnToggleLog(null, null);
             OnFitModeChanged(null, null);
@@ -447,7 +452,7 @@ namespace ATENtion.App
                 ImageMode = _imageMode,
                 ImageQuality = _imageQuality,
                 StreamAllTabs = StreamAllTabsItem.IsChecked,
-                HiddenTabCheckSeconds = _pausedCheckSeconds,
+                FrameRateLimit = _frameRateLimit,
                 ReopenTabs = ReopenTabsItem.IsChecked,
                 OpenProfileIds = _sessions
                     .Select(c => c.ConnectProfile?.Id)
@@ -507,10 +512,13 @@ namespace ATENtion.App
         }
 
         /// <summary>Show a temporary message that reverts to the persistent status after a few seconds.</summary>
-        private void FlashStatus(string text)
+        private void FlashStatus(string text) => FlashStatus(text, TimeSpan.FromSeconds(4));
+
+        private void FlashStatus(string text, TimeSpan duration)
         {
             StatusText.Text = text;
             _flashTimer.Stop();
+            _flashTimer.Interval = duration;
             _flashTimer.Start();
         }
 
@@ -594,12 +602,18 @@ namespace ATENtion.App
             foreach (var ctx in _sessions)
             {
                 var s = ctx.Session;
-                var state = PowerStatus.Displayed(s != null, ctx.LiveConnected,
+                bool live = s != null && ctx.LiveConnected;
+                var power = PowerStatus.Displayed(s != null, ctx.LiveConnected, s?.HostPower ?? HostPowerState.Unknown);
+                var signal = PowerStatus.Displayed(s != null, ctx.LiveConnected,
                     s?.VideoSignal ?? Core.Net.VideoSignalState.Unknown);
+                // A hidden tab's reading is only as fresh as its last check.
                 TimeSpan? age = null;
-                if (s != null && s.VideoPaused && s.VideoSignalUtc != default(DateTime))
-                    age = DateTime.UtcNow - s.VideoSignalUtc;
-                ctx.UpdatePower(state, age);
+                if (live && s.VideoPaused)
+                {
+                    DateTime seen = s.HostStatusSupported ? s.HostPowerUtc : s.VideoSignalUtc;
+                    if (seen != default(DateTime)) age = DateTime.UtcNow - seen;
+                }
+                ctx.UpdatePower(power, signal, age);
             }
         }
 
@@ -684,8 +698,10 @@ namespace ATENtion.App
             ctx.Attempts.Cancel();   // a connect still in flight would otherwise attach itself later
             var old = ctx.Session;
             ctx.Session = null;
-            // Off the UI thread: disposing waits for the session's threads to stop.
-            if (old != null) SessionContext.DisposeInBackground(old);
+            // Off the UI thread: disposing waits for the session's threads to stop. The web login
+            // that armed it is closed after it; see SessionContext.EndSession.
+            SessionContext.EndSession(old, ctx.WebLogin);
+            ctx.WebLogin = null;
             // Mounted media is left alone. Its channel is separate, and tested on an X10 board it
             // kept serving the host through the video session closing, a fresh web login and a new
             // video session, so a video reconnect need not pull the disc out of an install.
@@ -709,7 +725,97 @@ namespace ATENtion.App
                 if (s.Controlling == true) SetStatus(ctx, "● Controlling", StateGreen);
                 else SetStatus(ctx, "● View-only", StateOrange);
                 if (ReferenceEquals(ctx, _ctx)) UpdateTitle();
+                NoteSessionListChange(ctx, s);
+                NoteBmcNotice(ctx, s);
             }));
+        }
+
+        /// <summary>How long a "user connected/disconnected" notice stays in the status bar.</summary>
+        private static readonly TimeSpan SessionNoticeDuration = TimeSpan.FromSeconds(5);
+
+        // Announces users joining or leaving this tab's BMC. The first list a session receives is
+        // who was already there, ourselves included, so it is only remembered.
+        private void NoteSessionListChange(SessionContext ctx, KvmVideoSession s)
+        {
+            var list = s.Sessions;
+            if (!ReferenceEquals(ctx.SessionListOwner, s))
+            {
+                ctx.SessionListOwner = s;
+                ctx.KnownSessions = null;
+            }
+            if (ctx.KnownSessions == null)
+            {
+                if (list.Count > 0) ctx.KnownSessions = list;
+                return;
+            }
+            string notice = SessionListChanges.Notice(ctx.KnownSessions, list);
+            ctx.KnownSessions = list;
+            if (notice == null) return;
+            // Every tab shares the status bar, so name the server unless it is the only tab.
+            string text = _sessions.Count > 1 ? $"{ctx.DisplayName}: {notice}" : notice;
+            Core.Diagnostics.KvmLog.Write("Console sessions: " + text);
+            FlashStatus(text, SessionNoticeDuration);
+        }
+
+        // Reports a notice the BMC sent about this console, once per notice.
+        private void NoteBmcNotice(SessionContext ctx, KvmVideoSession s)
+        {
+            var notice = s.LastNotice;
+            if (notice == null || (ReferenceEquals(ctx.NoticeOwner, s) && ctx.ShownNotice == notice)) return;
+            ctx.NoticeOwner = s;
+            ctx.ShownNotice = notice;
+            string text;
+            switch (notice.Value)
+            {
+                case PrivilegeRecordType.SessionLimit:
+                    text = "The BMC has reached its maximum number of console sessions";
+                    SetStatus(ctx, "● Refused: session limit", StateRed);
+                    break;
+                case PrivilegeRecordType.BiosUpgrade: text = "The BMC is disconnecting consoles for a BIOS upgrade"; break;
+                case PrivilegeRecordType.FirmwareUpgrade: text = "The BMC is disconnecting consoles for a firmware upgrade"; break;
+                case PrivilegeRecordType.RaidUpgrade: text = "The BMC is disconnecting consoles for a RAID upgrade"; break;
+                default: return;   // a web logout: logged by the session, and the console carries on
+            }
+            FlashStatus(_sessions.Count > 1 ? $"{ctx.DisplayName}: {text}" : text, SessionNoticeDuration);
+        }
+
+        // ---- virtual media state ----
+
+        // Asks the visible tab's BMC which virtual-media slots are in use, when the Storage menu opens.
+        private async void OnStorageMenuOpened(object sender, RoutedEventArgs e)
+        {
+            var ctx = _ctx;
+            RefreshStorageMenu(ctx);
+            var options = ctx.ConnectOptions;
+            if (ctx.Vmedia != null)
+            {
+                VmediaStateItem.Header = "Virtual media: this tab has " + System.IO.Path.GetFileName(ctx.Vmedia.ImagePath) + " mounted";
+                return;
+            }
+            if (ctx.Session == null || options == null || !options.VirtualMediaEnabled)
+            {
+                VmediaStateItem.Header = ctx.Session == null ? "Virtual media: not connected" : "Virtual media: not offered by this BMC";
+                return;
+            }
+            VmediaStateItem.Header = "Virtual media: checking...";
+            var probe = new VirtualMediaOptions
+            {
+                Host = options.Host,
+                Port = options.VirtualMediaPort,
+                UseTls = options.VirtualMediaUseTls,
+                ClientCertificate = options.ClientCertificate,
+                ConnectTimeoutMs = 5000,
+            };
+            Core.Storage.VirtualMediaSlots slots = null;
+            try { slots = await Task.Run(() => VirtualMediaSession.ProbeSlots(probe)); }
+            catch (Exception ex) { Core.Diagnostics.KvmLog.Error("virtual media status", ex); }
+            if (!ReferenceEquals(ctx, _ctx) || ctx.Vmedia != null || ctx.Mounting) return;   // moved on meanwhile
+            bool taken = slots?.InUse(Core.Storage.VirtualMediaSlots.OwnSlot) == true;
+            VmediaStateItem.Header = slots == null ? "Virtual media: status unavailable"
+                : taken ? "Virtual media: another session has a disc mounted"
+                : slots.AnyInUse ? "Virtual media: another session has a device attached; a mount may be refused"
+                : "Virtual media: free";
+            if (taken) MountIsoItem.IsEnabled = false;
         }
 
         private void OnAbout(object sender, RoutedEventArgs e) =>
@@ -938,14 +1044,7 @@ namespace ATENtion.App
                         ScheduleReconnect(ctx, ex.Message);
                     }));
 
-                    try { session.Open(); }
-                    finally
-                    {
-                        // The web session is only needed until the KVM handshake has authenticated
-                        // (closing it earlier makes the BMC refuse the handshake), and every reconnect
-                        // logs in again, so close it rather than let the BMC's few slots fill up.
-                        Core.Net.BmcArmingClient.Logout(arming);
-                    }
+                    session.Open();
 
                     // Publish and start on the UI thread, in one step, so a close or a newer attempt
                     // either happens entirely before (and this one is dropped) or entirely after (and
@@ -956,6 +1055,7 @@ namespace ATENtion.App
                         ctx.Attempts.Complete(token);
                         abort.Dispose();
                         ctx.Session = owned;
+                        ctx.WebLogin = arming;     // closed when this session ends (TearDownSession)
                         ctx.ReconnectAttempts = 0; // healthy connection - reset the retry budget
                         ctx.QuietFailures = false;
                         _certHintShown = false; // allow the cert/clock hint again if a future drop needs it
@@ -971,12 +1071,16 @@ namespace ATENtion.App
                         owned.StartPump();
                         return true;
                     });
-                    if (!published) owned.Dispose();
+                    if (!published)
+                    {
+                        owned.Dispose();
+                        Core.Net.BmcArmingClient.Logout(arming);
+                    }
                 }
                 catch (Exception ex)
                 {
                     abort.Dispose();
-                    Core.Net.BmcArmingClient.Logout(arming);   // no-op if already closed
+                    Core.Net.BmcArmingClient.Logout(arming);   // the attempt failed: nothing uses this login
                     if (token.IsCancellationRequested)
                     {
                         // Superseded or closed: the failure is expected and belongs to no one.
@@ -1075,6 +1179,9 @@ namespace ATENtion.App
         // tab. Copies into that session's own snapshot and never blocks the pump.
         private void OnFrameDecoded(SessionContext ctx, FrameDecodedEventArgs e)
         {
+            // An update that changed nothing: most replies on a still screen. Copying and presenting
+            // them would redraw the same picture many times a second.
+            if (e.Dirty != null && e.Dirty.Count == 0) return;
             var f = e.Frame;
             lock (ctx.PresentLock)
             {
@@ -1087,7 +1194,7 @@ namespace ATENtion.App
                 }
                 // Full copy on resize / keyframe / whole-screen update / too many changed tiles;
                 // otherwise copy just the changed tiles and remember them for a partial blit.
-                bool full = sizeChanged || e.Dirty == null || e.Dirty.Count == 0 || IsFullScreen(e.Dirty)
+                bool full = sizeChanged || e.Dirty == null || IsFullScreen(e.Dirty)
                             || ctx.PresentFull || ctx.PresentDirty.Count + e.Dirty.Count > MaxDirtyRegions;
                 if (full)
                 {
@@ -1778,7 +1885,10 @@ namespace ATENtion.App
             {
                 SessionContext.DisposeInBackground(vm);
                 RefreshStorageMenu(owner);
-                if (failure != null && ReferenceEquals(owner, _ctx)) FlashStatus("Mount failed: " + failure.Message);
+                if (failure is Core.Storage.VirtualMediaRefusedException && ReferenceEquals(owner, _ctx))
+                    MessageBox.Show(this, failure.Message, "Can't mount " + name, MessageBoxButton.OK, MessageBoxImage.Information);
+                else if (failure != null && ReferenceEquals(owner, _ctx))
+                    FlashStatus("Mount failed: " + failure.Message);
                 return;
             }
 

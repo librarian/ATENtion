@@ -74,6 +74,7 @@ namespace ATENtion.Core.Video
         private byte[] _tilePlanes; // one tile's planes (bit-plane incremental)
         private byte[] _tileBgra;   // one tile's BGRA output (bit-plane incremental)
         private byte[] _rgb16;      // one tile's RGB555 words (type-2 incremental)
+        private byte[] _blockMap;   // ASPEED blocks written by the last packet
 
         // Grows the referenced buffer to at least the requested size, reusing it when already large enough.
         private static byte[] Ensure(ref byte[] buf, int size)
@@ -135,8 +136,9 @@ namespace ATENtion.Core.Video
                     _aspeedContextTried = true;
                     _aspeedContext = AspeedNativeDecoder.CreateContext();
                 }
-                AspeedNativeDecoder.Decode(packet, Frame, _aspeedContext);
-                return FullScreen;
+                if (!AspeedNativeDecoder.Decode(packet, Frame, _aspeedContext, ref _blockMap, out int blockSize))
+                    return FullScreen;
+                return DirtyFromBlocks(_blockMap, Width, Height, blockSize, _dirty);
             }
 
             var header = VideoPacketHeader.Parse(packet);
@@ -290,6 +292,67 @@ namespace ATENtion.Core.Video
                 _dirty.Add(new DirtyRect(x, y, w, h));
             }
             return _dirty;
+        }
+
+        /// <summary>Most rectangles returned before a frame is reported as a whole-screen change.</summary>
+        /// <remarks>Past this, one full upload costs less than many small ones.</remarks>
+        internal const int MaxDirtyRects = 64;
+
+        /// <summary>Turns the blocks an ASPEED packet wrote into the rectangles that changed.</summary>
+        /// <remarks>
+        /// An incremental reply on a still screen writes few blocks or none, yet was reported as a
+        /// whole-screen change, so every reply meant copying and uploading the full frame. Runs of
+        /// blocks in a row become one rectangle, and a run repeated in the next row extends it
+        /// downwards. An empty list means nothing changed.
+        /// </remarks>
+        internal static IReadOnlyList<DirtyRect> DirtyFromBlocks(byte[] map, int width, int height, int blockSize,
+                                                                List<DirtyRect> into)
+        {
+            into.Clear();
+            int columns = (width + blockSize - 1) / blockSize;
+            int rows = (height + blockSize - 1) / blockSize;
+            int previousStart = 0, previousEnd = 0;   // range of rectangles added by the previous row
+            for (int row = 0; row < rows; row++)
+            {
+                int rowStart = into.Count;
+                int y = row * blockSize;
+                int h = Math.Min(blockSize, height - y);
+                for (int col = 0; col < columns; col++)
+                {
+                    if (map[row * columns + col] == 0) continue;
+                    int first = col;
+                    while (col + 1 < columns && map[row * columns + col + 1] != 0) col++;
+                    int x = first * blockSize;
+                    int w = Math.Min((col + 1) * blockSize, width) - x;
+
+                    int extend = -1;
+                    for (int i = previousStart; i < previousEnd; i++)
+                        if (into[i].X == x && into[i].Width == w && into[i].Y + into[i].Height == y) { extend = i; break; }
+                    if (extend >= 0)
+                    {
+                        var r = into[extend];
+                        into[extend] = new DirtyRect(r.X, r.Y, r.Width, r.Height + h);
+                    }
+                    else
+                    {
+                        if (into.Count >= MaxDirtyRects) return FullScreen;
+                        into.Add(new DirtyRect(x, y, w, h));
+                    }
+                }
+                // Rectangles still open for extension: those this row added or extended.
+                previousStart = FirstTouchedBy(into, y + h, previousStart, rowStart);
+                previousEnd = into.Count;
+            }
+            return into;
+        }
+
+        // Index of the first rectangle ending at bottom, among those from start onwards. Rectangles
+        // the previous row left behind that this row did not extend can no longer grow.
+        private static int FirstTouchedBy(List<DirtyRect> rects, int bottom, int start, int rowStart)
+        {
+            for (int i = start; i < rowStart; i++)
+                if (rects[i].Y + rects[i].Height == bottom) return i;
+            return rowStart;
         }
 
         // Bytes occupied by one tile's planes: one byte per eight pixels, times the plane count.

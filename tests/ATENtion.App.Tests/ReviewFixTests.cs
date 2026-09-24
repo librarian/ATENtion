@@ -115,3 +115,49 @@ namespace ATENtion.App.Tests
         }
     }
 }
+
+namespace ATENtion.App.Tests
+{
+    /// <summary>The status-bar notice for users joining and leaving a BMC.</summary>
+    public class SessionListChangeTests
+    {
+        private static readonly string[] Two = { "283 ADMIN 10.0.0.2", "726 ADMIN 10.0.0.1" };
+
+        [Fact]
+        public void Someone_Joining_Is_Announced()
+        {
+            Assert.Equal("OPERATOR from 10.0.0.9 connected",
+                SessionListChanges.Notice(Two, Two.Concat(new[] { "801 OPERATOR 10.0.0.9" }).ToArray()));
+        }
+
+        [Fact]
+        public void Someone_Leaving_Is_Announced()
+        {
+            Assert.Equal("ADMIN from 10.0.0.2 disconnected",
+                SessionListChanges.Notice(Two, new[] { "726 ADMIN 10.0.0.1" }));
+        }
+
+        [Fact]
+        public void A_Reconnect_Shows_As_Both()
+        {
+            // The session id changes on every connection.
+            Assert.Equal("ADMIN from 10.0.0.2 connected; ADMIN from 10.0.0.2 disconnected",
+                SessionListChanges.Notice(Two, new[] { "900 ADMIN 10.0.0.2", "726 ADMIN 10.0.0.1" }));
+        }
+
+        [Fact]
+        public void No_Change_Means_No_Notice()
+        {
+            Assert.Null(SessionListChanges.Notice(Two, Two.Reverse().ToArray()));
+        }
+
+        [Theory]
+        [InlineData("283 ADMIN 10.0.0.2", "ADMIN from 10.0.0.2")]
+        [InlineData("odd-entry", "odd-entry")]
+        [InlineData(null, "")]
+        public void Entries_Read_As_User_And_Address(string entry, string expected)
+        {
+            Assert.Equal(expected, SessionListChanges.Describe(entry));
+        }
+    }
+}

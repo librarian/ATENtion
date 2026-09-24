@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System;
 using System.Diagnostics;
 using System.Linq;
@@ -27,7 +28,8 @@ namespace ATENtion.Tests
                 long before = session.FramesDecoded;
                 Thread.Sleep(2000);
                 long frames = session.FramesDecoded - before;
-                Assert.True(frames > 50, $"only {frames} frames in 2s after the host came on");
+                // Hundreds on loopback; the bug gave about two. Low enough for a slow CI runner.
+                Assert.True(frames > 20, $"only {frames} frames in 2s after the host came on");
             }
         }
 
@@ -45,19 +47,34 @@ namespace ATENtion.Tests
         }
 
         [Fact]
-        public void User_List_Shrinks_When_Another_User_Leaves()
+        public void User_List_Follows_Joins_And_Leaves()
         {
+            // The record sequence an X10 board sent (addresses changed): the list on connect, a
+            // web-logout notice, a full resend when someone joined, and one record when they left.
             using (var bmc = new FakeBmc())
             using (var session = Open(bmc))
             {
                 WaitFor(() => bmc.Requests > 0);
-                bmc.Push(FakeBmc.Privilege(2, 1, "11 OTHER 10.0.0.2"), FakeBmc.Privilege(1, 1, "12 ADMIN 10.0.0.1"));
-                Assert.True(WaitFor(() => session.Sessions.Count == 2));
+                bmc.Push(FakeBmc.Privilege(3, 1, "562 ADMIN 10.0.0.46"), FakeBmc.Privilege(2, 1, "328 ADMIN 10.0.0.46"),
+                         FakeBmc.Privilege(1, 1, "252 ADMIN 10.0.0.92"));
+                Assert.True(WaitFor(() => session.Sessions.Count == 3));
 
-                bmc.Push(FakeBmc.Privilege(1, 1, "12 ADMIN 10.0.0.1"));   // the same last record, alone
-                Assert.True(WaitFor(() => session.Sessions.Count == 1),
-                    "list still shows: " + string.Join(" | ", session.Sessions));
-                Assert.Equal("12 ADMIN 10.0.0.1", session.Sessions.Single());
+                bmc.Push(FakeBmc.Privilege(1, 3, "Kill Sesssion Due to Web Logout"));
+                Assert.True(WaitFor(() => session.LastNotice == PrivilegeRecordType.WebLogout));
+                Assert.Equal(3, session.Sessions.Count);   // a notice, not a session
+
+                bmc.Push(FakeBmc.Privilege(4, 1, "562 ADMIN 10.0.0.46"), FakeBmc.Privilege(3, 1, "328 ADMIN 10.0.0.46"),
+                         FakeBmc.Privilege(2, 1, "252 ADMIN 10.0.0.92"), FakeBmc.Privilege(1, 1, "709 ADMIN 10.0.0.92"),
+                         // then the newcomer again, twice, on its own
+                         FakeBmc.Privilege(1, 1, "709 ADMIN 10.0.0.92"), FakeBmc.Privilege(1, 1, "709 ADMIN 10.0.0.92"));
+                Thread.Sleep(300);
+                Assert.True(WaitFor(() => session.Sessions.Count == 4),
+                    "list after a join: " + string.Join(" | ", session.Sessions));
+
+                bmc.Push(FakeBmc.Privilege(1, 2, "709 ADMIN 10.0.0.92"));
+                Assert.True(WaitFor(() => session.Sessions.Count == 3),
+                    "list after a leave: " + string.Join(" | ", session.Sessions));
+                Assert.DoesNotContain(session.Sessions, e => e.StartsWith("709 "));
             }
         }
 
@@ -148,37 +165,64 @@ namespace ATENtion.Tests
         }
     }
 
-    /// <summary>The privilege-record burst logic on its own.</summary>
+    /// <summary>The privilege-record list logic on its own.</summary>
     public class SessionListBuilderTests
     {
+        private const uint Present = 1, Ended = 2, Logout = 3;
+
         [Fact]
         public void A_Burst_Completes_At_Index_One()
         {
             var b = new SessionListBuilder();
-            Assert.False(b.Add(2, "a", out _));
-            Assert.True(b.Add(1, "b", out var list));
-            Assert.Equal(new[] { "a", "b" }, list);
+            Assert.False(b.Add(2, Present, "1 a x", out _));
+            Assert.True(b.Add(1, Present, "2 b y", out var list));
+            Assert.Equal(new[] { "1 a x", "2 b y" }, list);
         }
 
         [Fact]
-        public void A_Repeated_Last_Record_Starts_A_New_List()
+        public void An_Ended_Record_Removes_That_Session()
         {
             var b = new SessionListBuilder();
-            b.Add(2, "a", out _);
-            b.Add(1, "b", out _);
-            Assert.True(b.Add(1, "b", out var list));
-            Assert.Equal(new[] { "b" }, list);
+            b.Add(2, Present, "1 a x", out _);
+            b.Add(1, Present, "2 b y", out _);
+            Assert.True(b.Add(1, Ended, "2 b y", out var list));
+            Assert.Equal(new[] { "1 a x" }, list);
         }
 
         [Fact]
-        public void A_Burst_Interrupted_By_A_Higher_Index_Starts_Over()
+        public void Notices_Leave_The_List_Alone()
         {
             var b = new SessionListBuilder();
-            b.Add(3, "a", out _);
-            b.Add(3, "x", out _);        // not lower: a new burst
-            b.Add(2, "y", out _);
-            Assert.True(b.Add(1, "z", out var list));
-            Assert.Equal(new[] { "x", "y", "z" }, list);
+            b.Add(1, Present, "1 a x", out _);
+            Assert.False(b.Add(1, Logout, "Kill Sesssion Due to Web Logout", out _));
+            Assert.False(b.Add(1, 7, "", out _));
+        }
+
+        [Fact]
+        public void A_Lone_Record_Updates_One_Entry_Rather_Than_Replacing_The_List()
+        {
+            var b = new SessionListBuilder();
+            b.Add(2, Present, "1 a x", out _);
+            b.Add(1, Present, "2 b y", out _);
+            Assert.False(b.Add(1, Present, "2 b y", out _));          // the repeat of a newcomer
+            Assert.True(b.Add(1, Present, "3 c z", out var list));    // a session not yet listed
+            Assert.Equal(new[] { "1 a x", "2 b y", "3 c z" }, list);
+        }
+
+        [Fact]
+        public void An_Unchanged_Resend_Is_Not_A_Change()
+        {
+            var b = new SessionListBuilder();
+            b.Add(1, Present, "1 a x", out _);
+            Assert.False(b.Add(1, Present, "1 a x", out _));
+        }
+
+        [Fact]
+        public void Ending_An_Unknown_Session_Is_Not_A_Change()
+        {
+            var b = new SessionListBuilder();
+            b.Add(1, Present, "1 a x", out _);
+            Assert.False(b.Add(1, Ended, "9 z z", out _));
         }
     }
 
@@ -192,6 +236,175 @@ namespace ATENtion.Tests
         public void The_Web_Root_Is_A_Valid_Url(string host, bool https, int port, string expected)
         {
             Assert.Equal(expected, BmcArmingClient.WebBaseUrl(host, https, port));
+        }
+    }
+}
+
+namespace ATENtion.Tests
+{
+    /// <summary>Host power from the BMC's status reply, and the checks that use it.</summary>
+    public class HostStatusTests
+    {
+        [Fact]
+        public void Power_Comes_From_The_Status_Reply_Even_Without_A_Picture()
+        {
+            // On, but no video: the case the video signal alone cannot tell from off.
+            using (var bmc = new FakeBmc { HostStatusPower = 1 })
+            using (var session = Open(bmc))
+            {
+                Assert.True(Wait(() => session.HostPower == HostPowerState.On));
+                Assert.True(Wait(() => session.VideoSignal == VideoSignalState.Absent));
+                Assert.True(session.HostStatusSupported);
+            }
+        }
+
+        [Fact]
+        public void A_Powered_Off_Host_Reads_As_Off()
+        {
+            using (var bmc = new FakeBmc { HostStatusPower = 0 })
+            using (var session = Open(bmc))
+                Assert.True(Wait(() => session.HostPower == HostPowerState.Off));
+        }
+
+        [Fact]
+        public void A_Hidden_Tab_Checks_With_The_Status_Query_When_The_BMC_Answers_It()
+        {
+            using (var bmc = new FakeBmc())
+            using (var session = Open(bmc, s => { s.VideoPaused = true; s.PausedCheckSeconds = 1; }))
+            {
+                Assert.True(Wait(() => session.HostStatusSupported));
+                int fullAfterStart = bmc.FullRequests, statusAfterStart = bmc.StatusQueries;
+                Thread.Sleep(3500);
+                Assert.Equal(fullAfterStart, bmc.FullRequests);
+                Assert.True(bmc.StatusQueries >= statusAfterStart + 2, $"{bmc.StatusQueries - statusAfterStart} status checks");
+            }
+        }
+
+        [Fact]
+        public void A_Hidden_Tab_Falls_Back_To_Full_Frames_When_Status_Goes_Unanswered()
+        {
+            using (var bmc = new FakeBmc { HostStatusPower = -1 })
+            using (var session = Open(bmc, s => { s.VideoPaused = true; s.PausedCheckSeconds = 1; }))
+            {
+                Assert.True(Wait(() => bmc.FullRequests >= 1));
+                Thread.Sleep(300);
+                int fullAfterStart = bmc.FullRequests;
+                Thread.Sleep(3500);
+                Assert.False(session.HostStatusSupported);
+                Assert.True(bmc.FullRequests >= fullAfterStart + 2, $"{bmc.FullRequests - fullAfterStart} full checks");
+            }
+        }
+
+        [Fact]
+        public void A_Visible_Tab_Keeps_Asking_For_Status()
+        {
+            using (var bmc = new FakeBmc())
+            using (var session = Open(bmc, s => s.HostStatusSeconds = 1))
+            {
+                Assert.True(Wait(() => bmc.StatusQueries >= 3, 5000), $"{bmc.StatusQueries} queries");
+            }
+        }
+
+        [Fact]
+        public void The_Frame_Rate_Limit_Is_Honoured()
+        {
+            using (var bmc = new FakeBmc { HostOn = true })
+            using (var session = Open(bmc, s => s.MinFrameIntervalMs = 100))
+            {
+                Thread.Sleep(500);
+                long before = session.FramesDecoded;
+                Thread.Sleep(2000);
+                long frames = session.FramesDecoded - before;
+                // About 20 at 10 per second; unlimited is hundreds. The floor only proves frames flow.
+                Assert.InRange(frames, 4, 30);
+            }
+        }
+
+        private static KvmVideoSession Open(FakeBmc bmc, Action<KvmVideoSession> configure = null)
+        {
+            var session = new KvmVideoSession(bmc.Options()) { LogInput = false };
+            configure?.Invoke(session);
+            session.Open();
+            session.StartPump();
+            return session;
+        }
+
+        private static bool Wait(Func<bool> condition, int timeoutMs = 3000)
+        {
+            var clock = Stopwatch.StartNew();
+            while (clock.ElapsedMilliseconds < timeoutMs)
+            {
+                if (condition()) return true;
+                Thread.Sleep(20);
+            }
+            return condition();
+        }
+    }
+
+    /// <summary>ASPEED block maps become the rectangles that changed.</summary>
+    public class DirtyBlockTests
+    {
+        private static IReadOnlyList<ATENtion.Core.Video.DirtyRect> Run(int width, int height, int block, params (int col, int row)[] marked)
+        {
+            int columns = (width + block - 1) / block, rows = (height + block - 1) / block;
+            var map = new byte[columns * rows];
+            foreach (var (col, row) in marked) map[row * columns + col] = 1;
+            return ATENtion.Core.Video.AtenTileDecoder.DirtyFromBlocks(map, width, height, block,
+                new List<ATENtion.Core.Video.DirtyRect>());
+        }
+
+        [Fact]
+        public void Nothing_Written_Means_Nothing_Changed()
+        {
+            Assert.Empty(Run(64, 48, 8));
+        }
+
+        [Fact]
+        public void A_Run_In_A_Row_Is_One_Rectangle()
+        {
+            var r = Assert.Single(Run(64, 48, 8, (2, 1), (3, 1), (4, 1)));
+            Assert.Equal((16, 8, 24, 8), (r.X, r.Y, r.Width, r.Height));
+        }
+
+        [Fact]
+        public void The_Same_Run_In_The_Next_Rows_Extends_Downwards()
+        {
+            var r = Assert.Single(Run(64, 48, 8, (1, 2), (2, 2), (1, 3), (2, 3), (1, 4), (2, 4)));
+            Assert.Equal((8, 16, 16, 24), (r.X, r.Y, r.Width, r.Height));
+        }
+
+        [Fact]
+        public void Different_Runs_Stay_Separate()
+        {
+            var rects = Run(64, 48, 8, (0, 0), (5, 0), (0, 1), (1, 1));
+            Assert.Equal(3, rects.Count);
+        }
+
+        [Fact]
+        public void Edge_Blocks_Are_Clipped_To_The_Frame()
+        {
+            // 100x60 in 16px blocks: the last column is 4px wide and the last row 12px tall.
+            var r = Assert.Single(Run(100, 60, 16, (6, 3)));
+            Assert.Equal((96, 48, 4, 12), (r.X, r.Y, r.Width, r.Height));
+        }
+
+        [Fact]
+        public void A_Whole_Keyframe_Is_One_Rectangle()
+        {
+            var all = new List<(int, int)>();
+            for (int row = 0; row < 6; row++) for (int col = 0; col < 8; col++) all.Add((col, row));
+            var r = Assert.Single(Run(64, 48, 8, all.ToArray()));
+            Assert.Equal((0, 0, 64, 48), (r.X, r.Y, r.Width, r.Height));
+        }
+
+        [Fact]
+        public void Too_Many_Pieces_Become_A_Whole_Screen_Update()
+        {
+            var scattered = new List<(int, int)>();
+            for (int row = 0; row < 48; row += 2) for (int col = 0; col < 128; col += 2) scattered.Add((col, row));
+            var rects = Run(1024, 384, 8, scattered.ToArray());
+            var r = Assert.Single(rects);
+            Assert.Equal(0xffff, r.X);   // the whole-screen sentinel
         }
     }
 }

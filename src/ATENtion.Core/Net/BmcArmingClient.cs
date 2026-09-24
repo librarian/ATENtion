@@ -220,9 +220,10 @@ namespace ATENtion.Core.Net
 
         /// <summary>Closes the web session that issued <paramref name="result"/>. Best effort.</summary>
         /// <remarks>
-        /// The temporary iKVM credentials are only accepted while that web session exists, so this
-        /// must wait until the KVM connection has authenticated. Logging out straight after arming
-        /// made the BMC refuse the KVM handshake.
+        /// Call this when the console it armed has ended. The BMC ties the console to this web
+        /// session: before the handshake a logout makes it refuse the credentials, and afterwards it
+        /// sends the console a "web logout" notice and drops it from the session list, which the
+        /// vendor viewer answers by closing. A mounted disc is unaffected.
         /// </remarks>
         public static void Logout(ArmingResult result)
         {

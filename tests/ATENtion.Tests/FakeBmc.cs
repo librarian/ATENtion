@@ -39,6 +39,11 @@ namespace ATENtion.Tests
         public volatile bool Answer = true;
         public volatile bool HostOn;
 
+        /// <summary>The power byte for host-status replies (0x37), or -1 to ignore the query as some firmware may.</summary>
+        public volatile int HostStatusPower = 1;
+        public int StatusQueries => Volatile.Read(ref _statusQueries);
+        private int _statusQueries;
+
         public KvmConnectionOptions Options() => new KvmConnectionOptions
         {
             Host = "127.0.0.1", Port = Port, KvmUsername = "user", KvmPassword = "pass",
@@ -58,19 +63,22 @@ namespace ATENtion.Tests
                 if (_silent) { Thread.Sleep(Timeout.Infinite); return; }
                 _client.Send(HandshakeScript());
 
+                // The client stream is parsed message by message, so a status query (a single 0x37
+                // byte) cannot be confused with a 0x37 inside another message.
                 var received = new List<byte>();
-                int scanned = 0;
+                int at = 12 + 1 + 48 + 1;   // version echo, security type, credentials, ClientInit
                 var chunk = new byte[4096];
                 int n;
                 while ((n = _client.Receive(chunk)) > 0)
                 {
                     for (int i = 0; i < n; i++) received.Add(chunk[i]);
-                    for (; scanned + 10 <= received.Count; scanned++)
+                    while (at < received.Count)
                     {
-                        if (!IsRequest(received, scanned, out bool incremental)) continue;
-                        Interlocked.Increment(ref _requests);
-                        if (!incremental) Interlocked.Increment(ref _fullRequests);
-                        if (Answer) _client.Send(HostOn ? FrameUpdate() : NoSignalUpdate());
+                        int length = MessageLength(received[at]);
+                        if (length < 0) throw new InvalidOperationException($"fake BMC: unknown client message 0x{received[at]:x2}");
+                        if (at + length > received.Count) break;
+                        Handle(received, at);
+                        at += length;
                     }
                 }
             }
@@ -79,13 +87,40 @@ namespace ATENtion.Tests
             catch (ThreadInterruptedException) { }
         }
 
-        // [3][incremental][x=0][y=0][w][h], all big-endian.
-        private static bool IsRequest(List<byte> d, int at, out bool incremental)
+        // Lengths of the messages this client sends, by type byte.
+        private static int MessageLength(byte type)
         {
-            incremental = d[at + 1] == 1;
-            return d[at] == 3 && d[at + 1] <= 1 && d[at + 2] == 0 && d[at + 3] == 0 && d[at + 4] == 0 &&
-                   d[at + 5] == 0 && d[at + 6] == Width >> 8 && d[at + 7] == (Width & 0xff) &&
-                   d[at + 8] == Height >> 8 && d[at + 9] == (Height & 0xff);
+            switch (type)
+            {
+                case 0x03: return 10;   // FramebufferUpdateRequest
+                case 0x04: return 18;   // key
+                case 0x05: return 18;   // pointer
+                case 0x07: return 3;    // runImage
+                case 0x15: return 9;    // keepalive
+                case 0x1a: return 2;    // power
+                case 0x32: return 5;    // screen info
+                case 0x36: return 3;    // mouse mode
+                case 0x37: return 1;    // host-status query
+                case 0x3a: return 1;    // hot-plug
+                default: return -1;
+            }
+        }
+
+        private void Handle(List<byte> d, int at)
+        {
+            switch (d[at])
+            {
+                case 0x03:
+                    Interlocked.Increment(ref _requests);
+                    if (d[at + 1] == 0) Interlocked.Increment(ref _fullRequests);
+                    if (Answer) _client.Send(HostOn ? FrameUpdate() : NoSignalUpdate());
+                    break;
+                case 0x37:
+                    Interlocked.Increment(ref _statusQueries);
+                    int power = HostStatusPower;
+                    if (Answer && power >= 0) _client.Send(new byte[] { 0x37, 0x00, 0x01, (byte)power });
+                    break;
+            }
         }
 
         private static byte[] HandshakeScript()

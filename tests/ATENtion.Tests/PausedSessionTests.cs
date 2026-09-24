@@ -19,7 +19,8 @@ namespace ATENtion.Tests
         [Fact]
         public void Paused_Session_Checks_Its_Host_And_Updates_The_Signal()
         {
-            using (var bmc = new FakeBmc())
+            // A BMC that ignores the host-status query, so the check is a full frame.
+            using (var bmc = new FakeBmc { HostStatusPower = -1 })
             using (var session = Connect(bmc, pausedCheckSeconds: 1))
             {
                 int afterStart = WaitForRequests(bmc, 1);   // the startup keyframe
