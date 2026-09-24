@@ -44,6 +44,13 @@ namespace ATENtion.Tests
         public int StatusQueries => Volatile.Read(ref _statusQueries);
         private int _statusQueries;
 
+        /// <summary>Key events received, in order: the USB-HID usage and whether it was a press.</summary>
+        public List<(uint Usage, bool Down)> Keys
+        {
+            get { lock (_keys) return new List<(uint, bool)>(_keys); }
+        }
+        private readonly List<(uint, bool)> _keys = new List<(uint, bool)>();
+
         public KvmConnectionOptions Options() => new KvmConnectionOptions
         {
             Host = "127.0.0.1", Port = Port, KvmUsername = "user", KvmPassword = "pass",
@@ -114,6 +121,10 @@ namespace ATENtion.Tests
                     Interlocked.Increment(ref _requests);
                     if (d[at + 1] == 0) Interlocked.Increment(ref _fullRequests);
                     if (Answer) _client.Send(HostOn ? FrameUpdate() : NoSignalUpdate());
+                    break;
+                case 0x04:   // [4][0][down][0][0][usage : u32 BE][padding]
+                    uint usage = (uint)(d[at + 5] << 24 | d[at + 6] << 16 | d[at + 7] << 8 | d[at + 8]);
+                    lock (_keys) _keys.Add((usage, d[at + 2] == 1));
                     break;
                 case 0x37:
                     Interlocked.Increment(ref _statusQueries);
