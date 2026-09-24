@@ -74,6 +74,10 @@ namespace ATENtion.Core.Net
         /// <summary>The full ordered list of JNLP arguments, retained for diagnostics.</summary>
         public System.Collections.Generic.List<string> Arguments { get; set; }
 
+        // The web session that issued these credentials, kept so it can be closed afterwards.
+        internal string WebBaseUrl { get; set; }
+        internal CookieContainer WebCookies { get; set; }
+
         /// <summary>
         /// The port to connect to, mirroring the original: the server TLS port (argument 9) when
         /// stunnel TLS is enabled, otherwise the plaintext iKVM port (argument 4), falling back to
@@ -141,9 +145,7 @@ namespace ATENtion.Core.Net
         /// firmware that needs the Redfish session path.</exception>
         public ArmingResult Arm(string host, string username, string password, bool useHttps = true, int webPort = 0)
         {
-            string scheme = useHttps ? "https" : "http";
-            int port = webPort != 0 ? webPort : (useHttps ? 443 : 80);
-            string baseUrl = $"{scheme}://{host}:{port}";
+            string baseUrl = WebBaseUrl(host, useHttps, webPort);
             var cookies = new CookieContainer();
 
             // Trust the BMC's self-signed web certificate (the equivalent of IPMIView's TrustAllManager).
@@ -169,6 +171,8 @@ namespace ATENtion.Core.Net
 
             var result = ParseJnlp(jnlp);
             ValidateArmingResult(result);
+            result.WebBaseUrl = baseUrl;
+            result.WebCookies = cookies;
             if (result.Arguments != null)
                 for (int i = 0; i < result.Arguments.Count; i++)
                 {
@@ -202,6 +206,34 @@ namespace ATENtion.Core.Net
                 throw new BmcLoginException(
                     "The BMC did not return a usable iKVM session. Check the saved user name and password.");
             }
+        }
+
+        /// <summary>The BMC's web root. An IPv6 literal is bracketed, as a URL requires.</summary>
+        internal static string WebBaseUrl(string host, bool useHttps, int webPort)
+        {
+            string scheme = useHttps ? "https" : "http";
+            int port = webPort != 0 ? webPort : (useHttps ? 443 : 80);
+            string authority = host.IndexOf(':') >= 0 && !host.StartsWith("[", StringComparison.Ordinal)
+                ? "[" + host + "]" : host;
+            return $"{scheme}://{authority}:{port}";
+        }
+
+        /// <summary>Closes the web session that issued <paramref name="result"/>. Best effort.</summary>
+        /// <remarks>
+        /// The temporary iKVM credentials are only accepted while that web session exists, so this
+        /// must wait until the KVM connection has authenticated. Logging out straight after arming
+        /// made the BMC refuse the KVM handshake.
+        /// </remarks>
+        public static void Logout(ArmingResult result)
+        {
+            if (result?.WebCookies == null) return;
+            try
+            {
+                Get(result.WebBaseUrl + "/cgi/logout.cgi", result.WebCookies, result.WebBaseUrl);
+                result.WebCookies = null;
+                KvmLog.Write("Arming: web session logged out.");
+            }
+            catch (Exception ex) { KvmLog.Error("web logout (continuing)", ex); }
         }
 
         // Scrapes the CSRF token from the top menu and posts op.cgi to set ikvm_setting=0 (the Java

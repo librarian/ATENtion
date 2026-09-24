@@ -5,6 +5,9 @@ using Xunit;
 
 namespace ATENtion.App.Tests
 {
+    // The settings store is a process-wide singleton, so tests that point it at a file must not
+    // run alongside each other.
+    [Collection(SettingsStoreCollection.Name)]
     public sealed class ConnectionSettingsTests : IDisposable
     {
         private readonly string _directory;
@@ -172,5 +175,11 @@ namespace ATENtion.App.Tests
         {
             try { Directory.Delete(_directory, true); } catch { }
         }
+    }
+
+    [CollectionDefinition(Name, DisableParallelization = true)]
+    public sealed class SettingsStoreCollection
+    {
+        public const string Name = "Settings store";
     }
 }

@@ -97,8 +97,11 @@ namespace ATENtion.Core.Protocol
                     Mode = stream.ReadU32BE(),
                 };
                 uint dataLen = stream.ReadU32BE();
-                Diagnostics.KvmLog.Write(
-                    $"  rect[{i}] ({r.X},{r.Y} {r.Width}x{r.Height}) enc=0x{r.Encoding:x8} mode=0x{r.Mode:x8} dataLen={dataLen}");
+                // Only data-less rectangles (the no-signal marker, heartbeats) are logged. Picture
+                // rectangles arrive many times a second and would swamp the log.
+                if (dataLen == 0)
+                    Diagnostics.KvmLog.Write(
+                        $"  rect[{i}] ({r.X},{r.Y} {r.Width}x{r.Height}) enc=0x{r.Encoding:x8} mode=0x{r.Mode:x8} dataLen=0");
                 r.Payload = dataLen == 0 ? new byte[0] : stream.ReadExact((int)dataLen);
                 u.Rects.Add(r);
             }

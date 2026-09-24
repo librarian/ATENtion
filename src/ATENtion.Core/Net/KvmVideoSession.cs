@@ -221,6 +221,10 @@ namespace ATENtion.Core.Net
         /// </remarks>
         public VideoSignalState VideoSignal { get; private set; } = VideoSignalState.Unknown;
 
+        /// <summary>Why the latest video could not be decoded, or null once a frame decodes.</summary>
+        /// <remarks>Lets the UI say why the screen stays blank instead of waiting indefinitely.</remarks>
+        public string LastDecodeError { get; private set; }
+
         /// <summary>UTC time <see cref="VideoSignal"/> was last confirmed by a frame or a no-signal marker.</summary>
         public DateTime VideoSignalUtc { get; private set; }
 
@@ -241,9 +245,7 @@ namespace ATENtion.Core.Net
         public System.Collections.Generic.IReadOnlyList<string> Sessions { get; private set; } =
             new string[0];
 
-        private readonly System.Collections.Generic.List<string> _pendingSessions =
-            new System.Collections.Generic.List<string>();
-        private uint _lastPrivilegeIndex;
+        private readonly SessionListBuilder _sessionList = new SessionListBuilder();
 
         public KvmVideoSession(KvmConnectionOptions options, IRfbAuthenticator authenticator = null)
         {
@@ -352,6 +354,35 @@ namespace ATENtion.Core.Net
             return StallAction.None;
         }
 
+        // One FramebufferUpdate arrived: one request is no longer in flight. Never below zero, since
+        // the BMC may send an update nobody asked for.
+        private void ReleaseOneRequest()
+        {
+            int seen;
+            do
+            {
+                seen = System.Threading.Volatile.Read(ref _outstanding);
+                if (seen <= 0) return;
+            }
+            while (System.Threading.Interlocked.CompareExchange(ref _outstanding, seen - 1, seen) != seen);
+        }
+
+        // A privilege record (0x39). The BMC sends one per console session as a burst; each is
+        // processed even when it repeats the previous one, or a user leaving would go unnoticed.
+        private void HandlePrivilege(ServerMessageResult msg)
+        {
+            bool changed = Controlling != msg.Controlling || PrivilegeInfo != msg.PrivilegeInfo;
+            Controlling = msg.Controlling;
+            PrivilegeInfo = msg.PrivilegeInfo;
+            if (_sessionList.Add(msg.PrivilegeIndex, msg.PrivilegeInfo, out var completed) &&
+                !System.Linq.Enumerable.SequenceEqual(completed, Sessions))
+            {
+                Sessions = completed;
+                changed = true;
+            }
+            if (changed) PrivilegeChanged?.Invoke(this, EventArgs.Empty);
+        }
+
         /// <summary>Watchdog body (off the timer thread): probe after a soft stall, fault after a hard one.</summary>
         private void WatchdogTick()
         {
@@ -420,10 +451,13 @@ namespace ATENtion.Core.Net
 
         /// <summary>Force a fresh full (non-incremental) frame now - repaints the whole
         /// surface, clearing any stale tiles. Wired to the UI's manual refresh.</summary>
+        /// <remarks>Sent by the input thread, so a caller on the UI thread never blocks on the socket.</remarks>
         public void RequestFullRefresh()
         {
-            try { SendUpdate(incremental: false); } catch (Exception ex) { Diagnostics.KvmLog.Error("manual refresh", ex); }
+            _fullRefreshRequested = true;
+            Wake();
         }
+        private volatile bool _fullRefreshRequested;
 
         /// <summary>Issues one framebuffer-update request and accounts for it in the request
         /// pipeline. The per-cycle message is the FramebufferUpdateRequest alone: runImage
@@ -484,14 +518,14 @@ namespace ATENtion.Core.Net
                     _connection.Stream.WriteU8(0x37);
                     _connection.Stream.Flush();
                 }
-                SendScreenInfo(ImageQuality, ImageMode);
+                WriteNow(ScreenInfoRequest.Build(ImageQuality, ImageMode));
                 SendRunImage();                 // runImage [7,0x0780] - once, like the original
                 SendUpdate(incremental: false); // first keyframe (bare FBUR)
                 // Prime the request pipeline: keep PipelineDepth FBURs in flight so the BMC encodes
                 // the next frame while the current one is decoded and presented (overlaps the round trip).
                 for (int i = 1; i < EffectivePipelineDepth; i++) SendUpdate(incremental: true);
                 // Tell the BMC the configured mouse mode (native sends setMouseMode on connect). Absolute (1) is needed for the absolute pointer coordinates to track.
-                SendMouseMode(MouseMode);
+                WriteNow(new byte[] { 0x36, 0x00, MouseMode });
                 // NOTE: do NOT auto-send hotPlug (0x3a). It appears to be a toggle/replug pulse with
                 // no parameter; the virtual USB keyboard/mouse is normally already attached, so an
                 // auto-send can TOGGLE it OFF. It's exposed as a manual menu action instead.
@@ -506,24 +540,14 @@ namespace ATENtion.Core.Net
                     if (++count <= 20) // log the first messages to characterise the stream
                         Diagnostics.KvmLog.Write($"msg #{count}: type 0x{msg.Type:x2}{(msg.IsFrame ? " (frame)" : "")}");
                     VideoBytes += msg.PayloadBytes;
-                    if (msg.HasPrivilege && (Controlling != msg.Controlling || PrivilegeInfo != msg.PrivilegeInfo))
-                    {
-                        Controlling = msg.Controlling;
-                        PrivilegeInfo = msg.PrivilegeInfo;
-
-                        // A record whose index did not decrease starts a fresh burst.
-                        if (msg.PrivilegeIndex >= _lastPrivilegeIndex) _pendingSessions.Clear();
-                        _lastPrivilegeIndex = msg.PrivilegeIndex;
-                        if (!string.IsNullOrWhiteSpace(msg.PrivilegeInfo))
-                            _pendingSessions.Add(msg.PrivilegeInfo);
-                        if (msg.PrivilegeIndex <= 1)
-                        {
-                            Sessions = _pendingSessions.ToArray();   // burst complete: publish it
-                            _lastPrivilegeIndex = 0;
-                        }
-
-                        PrivilegeChanged?.Invoke(this, EventArgs.Empty);
-                    }
+                    // Every FramebufferUpdate answers a request, including the no-signal marker and
+                    // an empty update. Counting only decoded pictures left the no-signal replies of
+                    // a powered-down host counted as outstanding, which stalled the stream once it
+                    // came back on.
+                    if (msg.Type == RfbMessageType.FramebufferUpdate) ReleaseOneRequest();
+                    if (msg.HasPrivilege) HandlePrivilege(msg);
+                    if (msg.IsFrame) LastDecodeError = null;
+                    else if (msg.DecodeError != null) LastDecodeError = msg.DecodeError;
                     if (msg.NoVideoSignal)
                     {
                         VideoSignal = VideoSignalState.Absent;
@@ -535,17 +559,18 @@ namespace ATENtion.Core.Net
                         VideoSignalUtc = DateTime.UtcNow;
                         FramesDecoded++;
                         LastFrameUtc = DateTime.UtcNow;
-                        System.Threading.Interlocked.Decrement(ref _outstanding); // this frame answered one request
                         FrameDecoded?.Invoke(this, new FrameDecodedEventArgs(Decoder.Frame, msg.Dirty));
                         if (msg.Resized)
                         {
                             // Resolution changed -> one full keyframe to repaint the new-size surface.
-                            // This also restores pipeline depth (−1 consumed above, +1 here).
+                            // This also restores pipeline depth (-1 released above, +1 here).
                             SendUpdate(incremental: false);
                         }
                         else
                         {
-                            // Top the pipeline back up to PipelineDepth. Steady state is exactly one
+                            // Top the pipeline back up to PipelineDepth. Only after a picture: topping up
+                            // after a no-signal reply would loop request and reply as fast as the link
+                            // allows while the host is off. Steady state is exactly one
                             // request per frame consumed (consume 1 -> send 1), so depth is bounded at
                             // PipelineDepth and cannot storm. The pump never blocks on the UI (the
                             // present is async), so it keeps draining the socket and the BMC keeps
@@ -674,6 +699,13 @@ namespace ATENtion.Core.Net
                 byte[] move = null; // then the single latest coalesced move, if any
                 lock (_inputLock) { if (_movePending) { move = _moveFrame; _movePending = false; } }
                 if (move != null) WriteFrame(move);
+
+                if (_fullRefreshRequested)
+                {
+                    _fullRefreshRequested = false;
+                    try { SendUpdate(incremental: false); }
+                    catch (Exception ex) { if (_senderRunning) Diagnostics.KvmLog.Error("manual refresh", ex); }
+                }
             }
         }
 
@@ -704,7 +736,7 @@ namespace ATENtion.Core.Net
             else
             {
                 lock (_inputLock) { _discrete.Enqueue(new InputItem(frame, false, 0)); _movePending = false; }
-                _inputSignal.Set();
+                Wake();
             }
             if (LogInput)
             {
@@ -745,10 +777,11 @@ namespace ATENtion.Core.Net
                     _discrete.Enqueue(new InputItem(frame, coalescible, coalescible ? stampMs : 0));
             }
             if (dropped) { NoteDroppedRepeat(); return; }
-            _inputSignal.Set();
-            if (LogInput)
-                Diagnostics.KvmLog.Write($"TX key keysym=0x{keysym:x4} {(down ? "down" : "up")}{(autoRepeat ? " (repeat)" : "")} : " +
-                                         Diagnostics.KvmLog.Hex(frame));
+            Wake();
+            // Which key is deliberately not logged: it would put whatever is typed on the host,
+            // passwords included, into the log file.
+            if (LogInput && !autoRepeat)
+                Diagnostics.KvmLog.Write($"TX key {(down ? "down" : "up")}");
         }
 
         /// <summary>Release every key currently held down (send an up for each) and clear the held set.
@@ -766,7 +799,7 @@ namespace ATENtion.Core.Net
                     _discrete.Enqueue(new InputItem(_keyboard.BuildKeyEvent(keysym, false), false, 0));
                 _heldKeys.Clear();
             }
-            _inputSignal.Set();
+            Wake();
             if (LogInput) Diagnostics.KvmLog.Write($"input: released {n} held key(s).");
         }
 
@@ -789,11 +822,7 @@ namespace ATENtion.Core.Net
         public void SendMouseMode(byte mode = 1)
         {
             byte[] frame = { 0x36, 0x00, mode };
-            lock (_sendLock)
-            {
-                _connection.Stream.WriteBytes(frame);
-                _connection.Stream.Flush();
-            }
+            Post(frame);
             Diagnostics.KvmLog.Write($"TX mousemode {mode} : " + Diagnostics.KvmLog.Hex(frame));
         }
 
@@ -802,11 +831,7 @@ namespace ATENtion.Core.Net
         public void SendScreenInfo(byte quality, ushort mode)
         {
             byte[] frame = ScreenInfoRequest.Build(quality, mode);
-            lock (_sendLock)
-            {
-                _connection.Stream.WriteBytes(frame);
-                _connection.Stream.Flush();
-            }
+            Post(frame);
             Diagnostics.KvmLog.Write($"TX screeninfo quality={quality} mode={mode} : " +
                 Diagnostics.KvmLog.Hex(frame));
         }
@@ -816,12 +841,39 @@ namespace ATENtion.Core.Net
         /// BMC's virtual HID, injected keystrokes/mouse go nowhere until this is sent.</summary>
         public void SendHotPlug()
         {
+            Post(new byte[] { 0x3a });
+            Diagnostics.KvmLog.Write("TX hotplug : 3a");
+        }
+
+        // Control frames from the UI go out on the input thread, in order with keys and clicks, so
+        // the caller never waits on the socket. Before the pump starts they are written directly.
+        private void Post(byte[] frame)
+        {
+            if (!_senderRunning)
+            {
+                // Before the pump starts, or after the session stopped; the latter has no socket left.
+                try { WriteNow(frame); }
+                catch (Exception ex) { Diagnostics.KvmLog.Error("control send", ex); }
+                return;
+            }
+            lock (_inputLock) { _discrete.Enqueue(new InputItem(frame, false, 0)); }
+            Wake();
+        }
+
+        // Wakes the input thread. A call that races a teardown finds the handle already released;
+        // there is nothing left to wake then.
+        private void Wake()
+        {
+            try { _inputSignal.Set(); } catch (ObjectDisposedException) { }
+        }
+
+        private void WriteNow(byte[] frame)
+        {
             lock (_sendLock)
             {
-                _connection.Stream.WriteU8(0x3a);
+                _connection.Stream.WriteBytes(frame);
                 _connection.Stream.Flush();
             }
-            Diagnostics.KvmLog.Write("TX hotplug : 3a");
         }
 
         /// <summary>Send a chassis power command (OEM record <c>[0x1a][code]</c>).</summary>
@@ -829,7 +881,7 @@ namespace ATENtion.Core.Net
         {
             byte[] frame = PowerControl.Build(command);
             lock (_inputLock) { _discrete.Enqueue(new InputItem(frame, false, 0)); }
-            _inputSignal.Set();
+            Wake();
             if (LogInput)
                 Diagnostics.KvmLog.Write($"TX power {command} : " + Diagnostics.KvmLog.Hex(frame));
         }

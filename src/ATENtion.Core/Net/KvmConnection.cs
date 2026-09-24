@@ -28,6 +28,12 @@ namespace ATENtion.Core.Net
         public X509Certificate2 ClientCertificate { get; set; }
         /// <summary>The TCP connect timeout, in milliseconds.</summary>
         public int ConnectTimeoutMs { get; set; } = 10000;
+        /// <summary>Longest wait for the BMC during TLS and the RFB handshake, in milliseconds.</summary>
+        /// <remarks>Without it, a BMC that accepts the connection and then says nothing hangs the connect forever.</remarks>
+        public int HandshakeTimeoutMs { get; set; } = 15000;
+        /// <summary>Longest a single write may block, in milliseconds, for the whole session.</summary>
+        /// <remarks>A write stuck on a dead link would otherwise hold the send lock indefinitely.</remarks>
+        public int SendTimeoutMs { get; set; } = 15000;
         /// <summary>The server-side virtual-media port from JNLP argument 10; normally 623.</summary>
         public int VirtualMediaPort { get; set; } = 623;
         /// <summary>True when virtual media uses the same direct mutual-TLS transport as KVM.</summary>
@@ -107,12 +113,15 @@ namespace ATENtion.Core.Net
         public void Connect()
         {
             Diagnostics.KvmLog.Write($"TCP connecting to {_options.Host}:{_options.Port} (timeout {_options.ConnectTimeoutMs}ms)...");
-            _tcp = new TcpClient { NoDelay = true };
             // Frames are tens of KB and can arrive every round trip, so the default window stalls
             // the sender mid-frame. Matches the native viewer and the virtual-media path.
-            try { _tcp.ReceiveBufferSize = 0x88b80; _tcp.SendBufferSize = 0x88b80; } catch { }
-            if (!_tcp.ConnectAsync(_options.Host, _options.Port).Wait(_options.ConnectTimeoutMs))
-                throw new TimeoutException($"Timed out connecting to {_options.Host}:{_options.Port}.");
+            _tcp = TcpConnect.Open(_options.Host, _options.Port, _options.ConnectTimeoutMs, tcp =>
+            {
+                try { tcp.ReceiveBufferSize = 0x88b80; tcp.SendBufferSize = 0x88b80; } catch { }
+            });
+            // Bounded until the handshake completes; Handshake lifts the read limit afterwards.
+            _tcp.ReceiveTimeout = _options.HandshakeTimeoutMs;
+            _tcp.SendTimeout = _options.SendTimeoutMs;
             Diagnostics.KvmLog.Write("TCP connected.");
 
             _transport = _tcp.GetStream();
@@ -140,6 +149,9 @@ namespace ATENtion.Core.Net
             if (Stream == null) throw new InvalidOperationException("Call Connect() first.");
             Session = new RfbHandshake(authenticator).Run(
                 Stream, _options.KvmUsername, _options.KvmPassword, Crypto);
+            // The session's reads block until the BMC has something to say, which on a static
+            // screen can be a while; the stall watchdog judges silence from here on.
+            _tcp.ReceiveTimeout = 0;
             return Session;
         }
 

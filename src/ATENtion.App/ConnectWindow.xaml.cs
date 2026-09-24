@@ -117,7 +117,13 @@ namespace ATENtion.App
                     MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
                 return;
 
-            ConnectSettings.Delete(_editingProfileId);
+            try { ConnectSettings.Delete(_editingProfileId); }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, "The server could not be deleted: " + ex.Message, "Delete failed",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
             _profiles = ConnectSettings.LoadProfiles();
             ProfileBox.ItemsSource = _profiles;
             if (_profiles.Count > 0)
@@ -161,7 +167,7 @@ namespace ATENtion.App
             if (!int.TryParse(profile.Port, out int port)) port = 5900;
             return new KvmConnectionOptions
             {
-                Host = (profile.Host ?? "").Trim(),
+                Host = ConnectSettings.NormalizeHost(profile.Host),
                 Port = port,
                 Token = profile.Token ?? "",
                 UseTls = profile.Tls,
@@ -169,7 +175,15 @@ namespace ATENtion.App
             };
         }
 
-        private static X509Certificate2 LoadClientCert()
+        // Loaded once per run. Each load with MachineKeySet writes a key file into the machine key
+        // store that stays until the certificate is finalised, and connects and restored tabs each
+        // loaded their own.
+        private static readonly Lazy<X509Certificate2> ClientCert =
+            new Lazy<X509Certificate2>(LoadClientCertOnce, System.Threading.LazyThreadSafetyMode.ExecutionAndPublication);
+
+        private static X509Certificate2 LoadClientCert() => ClientCert.Value;
+
+        private static X509Certificate2 LoadClientCertOnce()
         {
             // 1. A disk override next to the executable.
             try
@@ -228,7 +242,7 @@ namespace ATENtion.App
             ArmViaWeb = ArmBox.IsChecked == true;
             BmcUser = UserBox.Text.Trim();
             BmcPassword = PassBox.Password;
-            string host = HostBox.Text.Trim();
+            string host = ConnectSettings.NormalizeHost(HostBox.Text);
             if (string.IsNullOrEmpty(host))
             {
                 MessageBox.Show(this, "Enter a BMC host name or IP address.", "Host required",
@@ -260,7 +274,14 @@ namespace ATENtion.App
                 Tls = TlsBox.IsChecked == true,
             };
             Profile.ResolveIdentity(_loadedName);
-            Profile.Save();
+            try { Profile.Save(); }
+            catch (Exception ex)
+            {
+                // Connecting still works; only remembering the server failed.
+                Core.Diagnostics.KvmLog.Error("saving server profile", ex);
+                MessageBox.Show(this, "The server details could not be saved: " + ex.Message +
+                    "\n\nConnecting anyway.", "Save failed", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
 
             DialogResult = true;
             Close();

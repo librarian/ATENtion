@@ -121,6 +121,32 @@ namespace ATENtion.App
                 Name = match != null ? match.Name : (Host ?? "").Trim();
         }
 
+        /// <summary>The bare host name or address from what was typed in the host box.</summary>
+        /// <remarks>
+        /// Accepts a pasted web address ("https://10.0.0.5/"), a user prefix, a bracketed IPv6
+        /// literal, or "host:port". The port is dropped there because the web login always uses
+        /// HTTPS on 443 and the KVM port has its own field; a bare IPv6 address has several colons
+        /// and is left alone.
+        /// </remarks>
+        internal static string NormalizeHost(string input)
+        {
+            string host = (input ?? "").Trim();
+            int scheme = host.IndexOf("://", StringComparison.Ordinal);
+            if (scheme >= 0) host = host.Substring(scheme + 3);
+            int slash = host.IndexOf('/');
+            if (slash >= 0) host = host.Substring(0, slash);
+            int at = host.LastIndexOf('@');
+            if (at >= 0) host = host.Substring(at + 1);
+            if (host.StartsWith("[", StringComparison.Ordinal))
+            {
+                int close = host.IndexOf(']');
+                return close > 1 ? host.Substring(1, close - 1) : host.Trim('[', ']');
+            }
+            int colon = host.IndexOf(':');
+            if (colon >= 0 && colon == host.LastIndexOf(':')) host = host.Substring(0, colon);
+            return host.Trim();
+        }
+
         private static bool SameEndpoint(string hostA, string portA, string hostB, string portB) =>
             string.Equals((hostA ?? "").Trim(), (hostB ?? "").Trim(), StringComparison.OrdinalIgnoreCase) &&
             NormalPort(portA) == NormalPort(portB);
@@ -134,7 +160,7 @@ namespace ATENtion.App
         {
             if (string.IsNullOrEmpty(id)) return;
             var store = StableSettingsStore.Get();
-            store.Profiles.RemoveAll(p => p.Id == id);
+            store.RemoveProfile(id);
             if (store.LastProfileId == id)
                 store.LastProfileId = store.Profiles.FirstOrDefault()?.Id ?? "";
             store.Save();

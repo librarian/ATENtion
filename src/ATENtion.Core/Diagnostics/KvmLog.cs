@@ -40,7 +40,19 @@ namespace ATENtion.Core.Diagnostics
         public static event Action<string> Message;
 
         /// <summary>When set, every line is also appended to this file.</summary>
-        public static string FilePath;
+        public static string FilePath
+        {
+            get => _filePath;
+            set { lock (Gate) { CloseWriter(); _filePath = value; } }
+        }
+        private static string _filePath;
+
+        /// <summary>Size at which the log file is moved aside to <c>.old.log</c> and restarted.</summary>
+        public const long MaxFileBytes = 10L * 1024 * 1024;
+
+        // Kept open between lines: opening and closing the file for every line cost more than the
+        // work being logged once frames arrive many times a second.
+        private static StreamWriter _writer;
 
         /// <summary>
         /// Optional exact path for the one-shot unsupported-video dump. When null, the path is
@@ -118,14 +130,49 @@ namespace ATENtion.Core.Diagnostics
             string line = DateTime.Now.ToString("HH:mm:ss.fff") + "  " + message;
             try { Message?.Invoke(line); } catch { /* logging must never throw */ }
 
-            if (!string.IsNullOrEmpty(FilePath))
+            if (!string.IsNullOrEmpty(_filePath))
             {
                 lock (Gate)
                 {
-                    try { File.AppendAllText(FilePath, line + Environment.NewLine); }
-                    catch { /* best effort: a failed append must not fault the caller */ }
+                    try
+                    {
+                        if (_writer == null)
+                        {
+                            var file = new FileStream(_filePath, FileMode.Append, FileAccess.Write,
+                                                      FileShare.ReadWrite | FileShare.Delete);
+                            _writer = new StreamWriter(file) { AutoFlush = true };
+                        }
+                        _writer.WriteLine(line);
+                        if (_writer.BaseStream.Length > MaxFileBytes) Rotate();
+                    }
+                    catch { CloseWriter(); /* best effort: a failed append must not fault the caller */ }
                 }
             }
+        }
+
+        /// <summary>Empties the log file.</summary>
+        public static void Clear()
+        {
+            lock (Gate)
+            {
+                CloseWriter();
+                if (!string.IsNullOrEmpty(_filePath) && File.Exists(_filePath)) File.WriteAllText(_filePath, "");
+            }
+        }
+
+        // Keeps one previous file, so the log cannot grow without bound over a long session.
+        private static void Rotate()
+        {
+            CloseWriter();
+            string old = Path.ChangeExtension(_filePath, ".old.log");
+            try { if (File.Exists(old)) File.Delete(old); File.Move(_filePath, old); }
+            catch { }
+        }
+
+        private static void CloseWriter()
+        {
+            try { _writer?.Dispose(); } catch { }
+            _writer = null;
         }
 
         /// <summary>Writes an exception with a context label, plus its detail and any inner exception.</summary>

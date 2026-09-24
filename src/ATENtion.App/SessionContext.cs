@@ -46,6 +46,10 @@ namespace ATENtion.App
         public VirtualMediaSession Vmedia;
         public EventHandler<Exception> VmFaulted;
         public EventHandler VmClosed;
+        /// <summary>True while an ISO is attaching in the background.</summary>
+        public bool Mounting;
+        /// <summary>Moves on whenever media is cleared, so a mount that finishes afterwards is dropped.</summary>
+        public int MediaGeneration;
 
         // Connection details, kept so a dropped link can be re-established without prompting.
         public KvmConnectionOptions ConnectOptions;
@@ -196,15 +200,38 @@ namespace ATENtion.App
             {
                 if (VmFaulted != null) media.Faulted -= VmFaulted;
                 if (VmClosed != null) media.Closed -= VmClosed;
-                try { media.Dispose(); } catch { }
+                DisposeInBackground(media);
             }
             VmFaulted = null;
             VmClosed = null;
 
             var session = Session;
             Session = null;
-            try { session?.Dispose(); } catch { }
+            if (session != null) DisposeInBackground(session);
             LiveConnected = false;
+        }
+
+        // Every session disposal still running, so the window can wait for them briefly on exit.
+        private static readonly List<System.Threading.Tasks.Task> PendingDisposals = new List<System.Threading.Tasks.Task>();
+
+        /// <summary>Disposes off the UI thread, which would otherwise wait while the threads stop.</summary>
+        internal static void DisposeInBackground(IDisposable item)
+        {
+            var task = System.Threading.Tasks.Task.Run(() => { try { item.Dispose(); } catch { } });
+            lock (PendingDisposals)
+            {
+                PendingDisposals.RemoveAll(t => t.IsCompleted);
+                PendingDisposals.Add(task);
+            }
+        }
+
+        /// <summary>Waits up to <paramref name="timeout"/> for background disposals to finish.</summary>
+        /// <remarks>Used on exit, so an unmount reaches the BMC before the process ends.</remarks>
+        internal static void WaitForDisposals(TimeSpan timeout)
+        {
+            System.Threading.Tasks.Task[] pending;
+            lock (PendingDisposals) pending = PendingDisposals.ToArray();
+            try { System.Threading.Tasks.Task.WaitAll(pending, timeout); } catch { }
         }
 
         /// <summary>Hover text for the tab: the profile name and the address it resolves to.</summary>

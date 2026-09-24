@@ -207,10 +207,10 @@ namespace ATENtion.Core.Storage
                     return ScsiResult.Good(Cap(BuildModeSense6(), alloc));
 
                 case MODE_SENSE_10:
-                    return ScsiResult.Good(Cap(BuildModeSense10(), alloc));
+                    return ScsiResult.Good(Cap(BuildModeSense10(cdb[2] & 0x3F), alloc));
 
                 case READ_TOC:
-                    return ScsiResult.Good(Cap(BuildReadToc(cdb), alloc));
+                    return ExecuteReadToc(cdb, alloc);
 
                 case GET_CONFIGURATION:
                     return ScsiResult.Good(Cap(BuildGetConfiguration(cdb), alloc));
@@ -284,9 +284,16 @@ namespace ATENtion.Core.Storage
             return new byte[] { 0x03, 0x00, 0x00, 0x00 };
         }
 
-        // MODE SENSE(10) response emitted by the vendor target for page 0x2A.
-        private static byte[] BuildModeSense10()
+        private const int CapabilitiesPage = 0x2A;
+        private const int AllPages = 0x3F;
+
+        // MODE SENSE(10). The vendor target's page 0x2A (CD capabilities) is returned when that page
+        // or every page is asked for. Any other page gets the header alone, which says it has no
+        // parameters, rather than 0x2A data under a page code the host did not ask for.
+        private static byte[] BuildModeSense10(int page)
         {
+            if (page != CapabilitiesPage && page != AllPages)
+                return new byte[] { 0x00, 0x06, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00 };
             return new byte[]
             {
                 0x00, 0x24, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -328,28 +335,62 @@ namespace ATENtion.Core.Storage
             return data;
         }
 
-        // READ TOC (format 0): a TOC header, a single track-1 (data) descriptor, and the lead-out.
-        private byte[] BuildReadToc(byte[] cdb)
+        private const int LeadOutTrack = 0xAA;
+
+        // READ TOC. Format 1 (session information) describes the single session; every other
+        // format is answered with the format-0 TOC, as before, which hosts accept. The starting
+        // track selects where the list begins: 0 or 1 is the whole disc, the lead-out alone for
+        // 0xAA, and anything else does not exist on a one-track disc.
+        private ScsiResult ExecuteReadToc(byte[] cdb, int alloc)
         {
             bool msf = (cdb[1] & 0x02) != 0; // address format: minute/second/frame vs logical block
-            // 4-byte header followed by two 8-byte descriptors (track 1 and lead-out).
-            var toc = new byte[4 + 8 + 8];
+            int format = cdb[2] & 0x0F;
+            if (format == 0) format = (cdb[9] >> 6) & 0x03;   // older drives carry it in the control byte
+            if (format == 1) return ScsiResult.Good(Cap(BuildSessionInfo(msf), alloc));
+
+            int start = cdb[6];
+            if (start > 1 && start != LeadOutTrack)
+                return Fail(SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD_IN_CDB, 0x00);
+            return ScsiResult.Good(Cap(BuildReadToc(msf, leadOutOnly: start == LeadOutTrack), alloc));
+        }
+
+        // Format 0: a TOC header, a single track-1 (data) descriptor, and the lead-out.
+        private byte[] BuildReadToc(bool msf, bool leadOutOnly)
+        {
+            var toc = new byte[4 + (leadOutOnly ? 8 : 16)];
             int len = toc.Length - 2;
             toc[0] = (byte)(len >> 8); // TOC data length (excludes this 2-byte field), big-endian
             toc[1] = (byte)len;
             toc[2] = 0x01; // first track number
             toc[3] = 0x01; // last track number
 
-            // Track 1 descriptor.
-            toc[5] = 0x14;     // ADR = 1, control = 4 (data track)
-            toc[6] = 0x01;     // track number
-            WriteTocAddress(toc, 8, 0, msf);
+            int at = 4;
+            if (!leadOutOnly)
+            {
+                toc[at + 1] = 0x14;     // ADR = 1, control = 4 (data track)
+                toc[at + 2] = 0x01;     // track number
+                WriteTocAddress(toc, at + 4, 0, msf);
+                at += 8;
+            }
 
             // Lead-out descriptor (track number 0xAA) at the end of the disc.
-            toc[13] = 0x14;
-            toc[14] = 0xAA;
-            WriteTocAddress(toc, 16, _iso.TotalBlocks, msf);
+            toc[at + 1] = 0x14;
+            toc[at + 2] = LeadOutTrack;
+            WriteTocAddress(toc, at + 4, _iso.TotalBlocks, msf);
             return toc;
+        }
+
+        // Format 1: one complete session, whose first track is track 1 at the start of the disc.
+        private static byte[] BuildSessionInfo(bool msf)
+        {
+            var info = new byte[12];
+            info[1] = 10;      // data length
+            info[2] = 0x01;    // first complete session
+            info[3] = 0x01;    // last complete session
+            info[5] = 0x14;    // ADR = 1, data track
+            info[6] = 0x01;    // first track in the last session
+            WriteTocAddress(info, 8, 0, msf);
+            return info;
         }
 
         // Writes a TOC track address at the given offset, in either MSF or logical-block form.

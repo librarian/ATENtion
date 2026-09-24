@@ -33,6 +33,12 @@ namespace ATENtion.App
     /// </remarks>
     internal static class KeySymMap
     {
+        /// <summary>True for keys whose character depends on the keyboard layout: letters, digits, punctuation.</summary>
+        /// <remarks>These are sent by physical position (<see cref="KeyPositions"/>); the rest are the same on every layout.</remarks>
+        public static bool IsLayoutDependent(Key key) =>
+            (key >= Key.A && key <= Key.Z) || (key >= Key.D0 && key <= Key.D9) ||
+            (key >= Key.Oem1 && key <= Key.Oem102);
+
         /// <summary>Returns the ATEN keysym (raw USB-HID usage) for a key, or 0 when unmapped.</summary>
         /// <param name="key">The WPF key.</param>
         /// <returns>The raw USB-HID usage code, or 0 if the key has no mapping.</returns>
@@ -97,6 +103,8 @@ namespace ATENtion.App
                 case Key.Down: return 0x51;
                 case Key.Up: return 0x52;
                 case Key.NumLock: return 0x53;
+                case Key.Oem102: return 0x64;        // ISO < > | (normally sent by position; see KeyPositions)
+                case Key.Apps: return 0x65;          // Menu / context key
 
                 // Modifiers are standard USB-HID usages, left and right distinct (the native
                 // KeyMap.VKtoHID adds 4 for the right-hand twin): LCtrl 0xE0 / RCtrl 0xE4,

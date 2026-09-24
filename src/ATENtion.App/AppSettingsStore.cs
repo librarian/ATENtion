@@ -95,6 +95,7 @@ namespace ATENtion.App
                 string path = SettingsPath;
                 string directory = Path.GetDirectoryName(path);
                 Directory.CreateDirectory(directory);
+                MergeProfilesFromDisk(path);
 
                 var ui = new XElement("Ui",
                     Attr("left", WinLeft), Attr("top", WinTop),
@@ -189,19 +190,8 @@ namespace ATENtion.App
                     result.LastProfileId = Text(connections, "lastProfileId");
                     foreach (var item in connections.Elements("Profile"))
                     {
-                        string host = Text(item, "host").Trim();
-                        if (host.Length == 0) continue;
-                        result.Profiles.Add(new StoredConnectionProfile
-                        {
-                            Id = NonEmpty(Text(item, "id"), Guid.NewGuid().ToString("N")),
-                            Name = Text(item, "name"),
-                            Host = host,
-                            User = NonEmpty(Text(item, "user"), "ADMIN"),
-                            Port = NonEmpty(Text(item, "port"), "5900"),
-                            Arm = Bool(item, "arm", true),
-                            Tls = Bool(item, "tls", true),
-                            ProtectedPassword = Text(item, "password"),
-                        });
+                        var profile = ReadProfile(item);
+                        if (profile != null) result.Profiles.Add(profile);
                     }
                 }
                 var tabs = root.Element("OpenTabs");
@@ -224,6 +214,59 @@ namespace ATENtion.App
                 PreserveUnreadable(path);
                 return MigrateLegacy();
             }
+        }
+
+        private static StoredConnectionProfile ReadProfile(XElement item)
+        {
+            string host = Text(item, "host").Trim();
+            if (host.Length == 0) return null;
+            return new StoredConnectionProfile
+            {
+                Id = NonEmpty(Text(item, "id"), Guid.NewGuid().ToString("N")),
+                Name = Text(item, "name"),
+                Host = host,
+                User = NonEmpty(Text(item, "user"), "ADMIN"),
+                Port = NonEmpty(Text(item, "port"), "5900"),
+                Arm = Bool(item, "arm", true),
+                Tls = Bool(item, "tls", true),
+                ProtectedPassword = Text(item, "password"),
+            };
+        }
+
+        // Profiles deleted here since loading, so a merge does not bring them back from the file.
+        private readonly HashSet<string> _deletedProfileIds = new HashSet<string>();
+
+        /// <summary>Removes a saved server, and keeps it removed when the file is next merged.</summary>
+        internal void RemoveProfile(string id)
+        {
+            lock (Sync)
+            {
+                Profiles.RemoveAll(p => p.Id == id);
+                _deletedProfileIds.Add(id);
+            }
+        }
+
+        // Another running copy of ATENtion may have saved servers since this one loaded. Adopting
+        // them before writing keeps the last window to save from silently dropping them. Edits to
+        // the same server are last-writer-wins, as are the window and tab settings.
+        private void MergeProfilesFromDisk(string path)
+        {
+            if (!File.Exists(path)) return;
+            try
+            {
+                var connections = LoadWithRetry(path).Root?.Element("Connections");
+                if (connections == null) return;
+                foreach (var item in connections.Elements("Profile"))
+                {
+                    // Without a stored id it would get a new one on every read and multiply.
+                    if (Text(item, "id").Length == 0) continue;
+                    var profile = ReadProfile(item);
+                    if (profile == null || _deletedProfileIds.Contains(profile.Id)) continue;
+                    if (Profiles.Exists(p => p.Id == profile.Id)) continue;
+                    Profiles.Add(profile);
+                }
+            }
+            catch (Exception ex) { Core.Diagnostics.KvmLog.Error("merging saved servers", ex); }
         }
 
         private static XDocument LoadWithRetry(string path)

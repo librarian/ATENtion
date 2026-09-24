@@ -98,6 +98,9 @@ namespace ATENtion.Core.Net
         /// </summary>
         private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(10);
 
+        // A write blocked this long means the link is gone; it faults rather than hold the lock.
+        private const int SendTimeoutMs = 30000;
+
         /// <summary>Creates a virtual-media session bound to the given options.</summary>
         /// <param name="options">The host, port, and ISO image to serve.</param>
         /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
@@ -137,22 +140,34 @@ namespace ATENtion.Core.Net
         {
             KvmLog.Write($"vmedia: opening {purpose} channel to {_options.Host}:{_options.Port} " +
                          $"({(_options.UseTls ? "TLS" : "plaintext")})...");
-            var tcp = new TcpClient { NoDelay = true }; // native sets TCP_NODELAY and 0x88b80 send/recv buffers
-            tcp.SendBufferSize = 0x88b80;
-            tcp.ReceiveBufferSize = 0x88b80;
-            if (!tcp.ConnectAsync(_options.Host, _options.Port).Wait(_options.ConnectTimeoutMs))
-                throw new TimeoutException($"Timed out connecting to {_options.Host}:{_options.Port}.");
-            Stream transport = tcp.GetStream();
-            if (_options.UseTls)
+            // Native sets TCP_NODELAY and 0x88b80 send/recv buffers.
+            var tcp = TcpConnect.Open(_options.Host, _options.Port, _options.ConnectTimeoutMs, t =>
             {
-                var ssl = new SslStream(transport, false, AcceptServerCertificate);
-                var certificates = new X509CertificateCollection();
-                if (_options.ClientCertificate != null) certificates.Add(_options.ClientCertificate);
-                ssl.AuthenticateAsClient(_options.Host, certificates, SslProtocols.Tls12, false);
-                transport = ssl;
-                KvmLog.Write($"vmedia: TLS established: {ssl.SslProtocol}, cipher {ssl.CipherAlgorithm}.");
+                t.SendBufferSize = 0x88b80;
+                t.ReceiveBufferSize = 0x88b80;
+            });
+            try
+            {
+                // Bounded for the attach exchange; the data channel lifts the read limit once serving.
+                tcp.ReceiveTimeout = _options.ConnectTimeoutMs;
+                tcp.SendTimeout = SendTimeoutMs;
+                Stream transport = tcp.GetStream();
+                if (_options.UseTls)
+                {
+                    var ssl = new SslStream(transport, false, AcceptServerCertificate);
+                    var certificates = new X509CertificateCollection();
+                    if (_options.ClientCertificate != null) certificates.Add(_options.ClientCertificate);
+                    ssl.AuthenticateAsClient(_options.Host, certificates, SslProtocols.Tls12, false);
+                    transport = ssl;
+                    KvmLog.Write($"vmedia: TLS established: {ssl.SslProtocol}, cipher {ssl.CipherAlgorithm}.");
+                }
+                return new Channel(tcp, transport);
             }
-            return new Channel(tcp, transport);
+            catch
+            {
+                tcp.Close();
+                throw;
+            }
         }
 
         private void PerformAttachHandshake()
@@ -249,6 +264,8 @@ namespace ATENtion.Core.Net
         public void StartServing()
         {
             if (_stream == null) throw new InvalidOperationException("Call Open() first.");
+            // The host only reads while it wants data, so silence on the data channel is normal.
+            _tcp.ReceiveTimeout = 0;
             _running = true;
             _serveThread = new Thread(ServeLoop) { IsBackground = true, Name = "vmedia-serve" };
             _serveThread.Start();
@@ -380,7 +397,13 @@ namespace ATENtion.Core.Net
             _running = false;
             try { _keepAliveTimer?.Dispose(); } catch { }
             _keepAliveTimer = null;
-            try { if (_stream != null) SendControl(5); } catch { }
+            // Under the send lock: the serve thread or a keepalive may be mid-write on the same stream.
+            // A writer stuck on a dead link is not waited out; the socket close below ends it.
+            if (_stream != null && Monitor.TryEnter(_sendLock, 1000))
+            {
+                try { SendControl(5); } catch { }
+                finally { Monitor.Exit(_sendLock); }
+            }
             // The BMC normally answers type 5 with type 6, which lets the serve loop finish cleanly.
             // If it does not, close the socket after a short grace period to unblock the read.
             try { _serveThread?.Join(1000); } catch { }

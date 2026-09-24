@@ -131,7 +131,7 @@ namespace ATENtion.Capture
                 };
 
                 if (!string.IsNullOrEmpty(cli.MountIso))
-                    return RunVirtualMediaProbe(connection, cli.MountIso, cli.TimeoutSeconds,
+                    return RunVirtualMediaProbe(connection, arming, cli.MountIso, cli.TimeoutSeconds,
                         cli.VirtualMediaHost, cli.VirtualMediaPort, cli.VirtualMediaPlain);
 
                 Exception fault = null;
@@ -159,7 +159,8 @@ namespace ATENtion.Capture
                         }
                         completion.Set();
                     };
-                    session.Open();
+                    try { session.Open(); }
+                    finally { BmcArmingClient.Logout(arming); }   // only needed until the handshake
                     session.StartPump();
 
                     Console.WriteLine($"Connected. Waiting up to {cli.TimeoutSeconds}s for a decoded video frame...");
@@ -235,7 +236,8 @@ namespace ATENtion.Capture
             return result;
         }
 
-        private static int RunVirtualMediaProbe(KvmConnectionOptions connection, string imagePath, int seconds,
+        private static int RunVirtualMediaProbe(KvmConnectionOptions connection, ArmingResult arming,
+                                                string imagePath, int seconds,
                                                 string endpointHost, int endpointPort, bool forcePlain)
         {
             if (!connection.VirtualMediaEnabled)
@@ -254,7 +256,8 @@ namespace ATENtion.Capture
             {
                 Exception fault = null;
                 media.Faulted += (sender, ex) => fault = ex;
-                media.Open();
+                try { media.Open(); }
+                finally { BmcArmingClient.Logout(arming); }
                 media.StartServing();
                 Console.WriteLine($"Mounted {Path.GetFileName(imagePath)} for {seconds}s; press Ctrl+C to stop early.");
                 using (var cancelled = new ManualResetEventSlim(false))

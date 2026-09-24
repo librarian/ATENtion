@@ -102,8 +102,10 @@ namespace ATENtion.App
         // Auto-reconnect: remembers the last connection so a dropped link can be re-established.
         private DispatcherTimer _reconnectTimer => _ctx.ReconnectTimer;
         private int _reconnectAttempts { get => _ctx.ReconnectAttempts; set => _ctx.ReconnectAttempts = value; }
-        private const int ReconnectDelaySeconds = 5;
-        private const int MaxReconnectAttempts = 10;
+        // Quick retries for a blip, then a slower pace that still outlasts a BMC reboot (a few
+        // minutes) instead of giving up after the first minute.
+        private const int MaxReconnectAttempts = 30;
+        private static int ReconnectDelaySeconds(int attempt) => attempt <= 5 ? 5 : 30;
         private KvmConnectionOptions _connectOptions { get => _ctx.ConnectOptions; set => _ctx.ConnectOptions = value; }
         private ConnectSettings _connectProfile { get => _ctx.ConnectProfile; set => _ctx.ConnectProfile = value; }
         private bool _armViaWeb { get => _ctx.ArmViaWeb; set => _ctx.ArmViaWeb = value; }
@@ -170,6 +172,7 @@ namespace ATENtion.App
             if (next == null || ReferenceEquals(next, _ctx)) return;
             var leaving = _ctx;
             if (leaving != null) ReleaseHeldInput(leaving);
+            if (VideoImage.IsMouseCaptured) VideoImage.ReleaseMouseCapture();
             _ctx = next;
             if (!ReferenceEquals(SessionTabs.SelectedItem, next)) SessionTabs.SelectedItem = next;
             ApplyTabStreaming();
@@ -230,11 +233,7 @@ namespace ATENtion.App
             StatsText.Text = ctx.StatsText;
             InfoText.Text = ctx.InfoText;
             if (ctx.OverlayVisible) ShowOverlay(ctx.OverlayText); else HideOverlay();
-            MountIsoItem.IsEnabled = ctx.Vmedia == null;
-            UnmountIsoItem.IsEnabled = ctx.Vmedia != null;
-            UnmountIsoItem.Header = ctx.Vmedia != null
-                ? $"_Unmount ({System.IO.Path.GetFileName(ctx.Vmedia.ImagePath)})"
-                : "_Unmount";
+            RefreshStorageMenu(ctx);
             // Re-tick for the tab being shown. Sync only - it already has these values.
             SyncFullRefreshMenu();
             SyncDisplayPreferenceMenu();
@@ -421,11 +420,16 @@ namespace ATENtion.App
         private void OnClosed(object sender, EventArgs e)
         {
             _statsTimer.Stop();
+            _logFlushTimer.Stop();
             _reconnectTimer.Stop();
             _flashTimer.Stop();
-            SaveUi();
+            try { SaveUi(); }
+            catch (Exception ex) { Core.Diagnostics.KvmLog.Error("saving settings on exit", ex); }
             // Tear down every tab, not just the visible one.
             foreach (var ctx in _sessions) ctx.Dispose();
+            // Give the disposals a moment, so each mounted disc is released at the BMC rather than
+            // dropped mid-read when the process ends.
+            SessionContext.WaitForDisposals(TimeSpan.FromSeconds(3));
         }
 
         private void SaveUi()
@@ -569,9 +573,18 @@ namespace ATENtion.App
             // disconnected states set their own overlay text and clear _liveConnected.)
             if (_liveConnected)
             {
-                if (df > 0) { _noFrameTicks = 0; HideOverlay(); }
-                else if (++_noFrameTicks >= WaitGraceTicks) ShowOverlay("Waiting for video...");
+                if (df > 0) { _noFrameTicks = 0; HideOverlay(ctx); }
+                else if (++_noFrameTicks >= WaitGraceTicks) ShowOverlay(ctx, NoPictureText(s));
             }
+        }
+
+        // Why nothing is on screen, as far as the stream says.
+        private static string NoPictureText(KvmVideoSession s)
+        {
+            if (s.LastDecodeError != null) return "The video from this BMC can't be decoded: " + s.LastDecodeError;
+            if (s.VideoSignal == Core.Net.VideoSignalState.Absent)
+                return "No video signal - the host is off, or on but not sending video.";
+            return "Waiting for video...";
         }
 
         // Read straight off the video stream (KvmVideoSession.VideoSignal): no dependency on Redfish
@@ -597,13 +610,35 @@ namespace ATENtion.App
             string exe = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;
             string path = System.IO.Path.ChangeExtension(exe, ".log");
             Core.Diagnostics.KvmLog.FilePath = path;
-            Core.Diagnostics.KvmLog.Message += line =>
-                Dispatcher.BeginInvoke(new System.Action(() =>
-                {
-                    LogBox.AppendText(line + System.Environment.NewLine);
-                    LogBox.ScrollToEnd();
-                }));
+            // Lines arrive from every session's threads, often many a second. They are queued and
+            // added to the panel in batches, rather than one dispatcher call per line.
+            Core.Diagnostics.KvmLog.Message += line => _pendingLog.Enqueue(line);
+            _logFlushTimer.Tick += (s, e) => FlushLogPanel();
+            _logFlushTimer.Start();
             Core.Diagnostics.KvmLog.Write("=== ATENtion started; log file: " + path + " ===");
+        }
+
+        private readonly System.Collections.Concurrent.ConcurrentQueue<string> _pendingLog =
+            new System.Collections.Concurrent.ConcurrentQueue<string>();
+        private readonly DispatcherTimer _logFlushTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+
+        /// <summary>Lines kept in the log panel. The file keeps everything; the panel only the recent part.</summary>
+        private const int LogPanelMaxChars = 400_000;
+
+        private void FlushLogPanel()
+        {
+            if (_pendingLog.IsEmpty) return;
+            var batch = new System.Text.StringBuilder();
+            while (batch.Length < LogPanelMaxChars && _pendingLog.TryDequeue(out string line))
+                batch.Append(line).Append(Environment.NewLine);
+            LogBox.AppendText(batch.ToString());
+            if (LogBox.Text.Length > LogPanelMaxChars)
+            {
+                string text = LogBox.Text;
+                int cut = text.IndexOf('\n', text.Length - LogPanelMaxChars / 2);
+                LogBox.Text = cut < 0 ? "" : text.Substring(cut + 1);
+            }
+            LogBox.ScrollToEnd();
         }
 
         private void OnLoaded(object sender, RoutedEventArgs e)
@@ -620,6 +655,10 @@ namespace ATENtion.App
             bool? ok = dialog.ShowDialog();
             if (ok != true || string.IsNullOrWhiteSpace(dialog.Options.Host))
                 return false;
+
+            // Media mounted from the previous server cannot follow the tab to a different one.
+            if (!string.Equals(_connectOptions?.Host, dialog.Options.Host, StringComparison.OrdinalIgnoreCase))
+                ClearVmedia();
 
             // Remember these inputs so a dropped link can be auto-reconnected.
             _connectOptions = dialog.Options;
@@ -643,15 +682,13 @@ namespace ATENtion.App
         private void TearDownSession(SessionContext ctx)
         {
             ctx.Attempts.Cancel();   // a connect still in flight would otherwise attach itself later
-            if (ctx.Session != null)
-            {
-                try { ctx.Session.Dispose(); } catch { }
-                ctx.Session = null;
-            }
-            // Virtual media is bound to the KVM session's credentials, so the BMC drops the mount
-            // when this session ends. Without this the menu still offers Unmount and the status bar
-            // still names the image, for media the BMC has already released.
-            ClearVmedia(ctx);
+            var old = ctx.Session;
+            ctx.Session = null;
+            // Off the UI thread: disposing waits for the session's threads to stop.
+            if (old != null) SessionContext.DisposeInBackground(old);
+            // Mounted media is left alone. Its channel is separate, and tested on an X10 board it
+            // kept serving the host through the video session closing, a fresh web login and a new
+            // video session, so a video reconnect need not pull the disc out of an install.
             ctx.ConnectedAt = null;
             ctx.InfoText = "";
             ctx.LastFrames = ctx.LastBytes = 0;
@@ -680,7 +717,6 @@ namespace ATENtion.App
 
         private SessionInfoWindow _sessionInfo;
 
-        /// <summary>Open (or focus) the live Session Info dialog.</summary>
         /// <summary>The active session's reported console sessions, for the User List dialog.</summary>
         internal IReadOnlyList<string> CurrentSessions => _session?.Sessions;
 
@@ -694,6 +730,7 @@ namespace ATENtion.App
             _userList.Show();
         }
 
+        /// <summary>Open (or focus) the live Session Info dialog.</summary>
         private void OnSessionInfo(object sender, RoutedEventArgs e)
         {
             if (_sessionInfo != null) { _sessionInfo.Activate(); return; }
@@ -758,6 +795,7 @@ namespace ATENtion.App
             _reconnectTimer.Stop();
             _reconnectAttempts = 0;
             TearDownSession();
+            ClearVmedia();   // an explicit disconnect ends everything, the mounted disc included
             _liveConnected = false;
             StatsText.Text = "";
             SetStatus("● Disconnected", StateRed);
@@ -799,9 +837,10 @@ namespace ATENtion.App
             }
             ctx.ReconnectAttempts++;
             SetStatus(ctx, "● Reconnecting...", StateNeutral);
-            ShowOverlay(ctx, $"Disconnected: {why} - reconnecting in {ReconnectDelaySeconds}s " +
+            int delay = ReconnectDelaySeconds(ctx.ReconnectAttempts);
+            ShowOverlay(ctx, $"Disconnected: {why} - reconnecting in {delay}s " +
                              $"(attempt {ctx.ReconnectAttempts}/{MaxReconnectAttempts})...");
-            ctx.ReconnectTimer.Interval = TimeSpan.FromSeconds(ReconnectDelaySeconds);
+            ctx.ReconnectTimer.Interval = TimeSpan.FromSeconds(delay);
             ctx.ReconnectTimer.Stop();
             ctx.ReconnectTimer.Start();
         }
@@ -842,13 +881,14 @@ namespace ATENtion.App
             Task.Run(() =>
             {
                 bool armingCompleted = !armViaWeb;
+                Core.Net.ArmingResult arming = null;
                 KvmVideoSession session = null;
                 CancellationTokenRegistration abort = default(CancellationTokenRegistration);
                 try
                 {
                     if (armViaWeb)
                     {
-                        var arming = new Core.Net.BmcArmingClient().Arm(options.Host, bmcUser, bmcPassword);
+                        arming = new Core.Net.BmcArmingClient().Arm(options.Host, bmcUser, bmcPassword);
                         armingCompleted = true;
                         options.KvmUsername = arming.KvmUsername;
                         options.KvmPassword = arming.KvmPassword;
@@ -898,7 +938,14 @@ namespace ATENtion.App
                         ScheduleReconnect(ctx, ex.Message);
                     }));
 
-                    session.Open();
+                    try { session.Open(); }
+                    finally
+                    {
+                        // The web session is only needed until the KVM handshake has authenticated
+                        // (closing it earlier makes the BMC refuse the handshake), and every reconnect
+                        // logs in again, so close it rather than let the BMC's few slots fill up.
+                        Core.Net.BmcArmingClient.Logout(arming);
+                    }
 
                     // Publish and start on the UI thread, in one step, so a close or a newer attempt
                     // either happens entirely before (and this one is dropped) or entirely after (and
@@ -929,6 +976,7 @@ namespace ATENtion.App
                 catch (Exception ex)
                 {
                     abort.Dispose();
+                    Core.Net.BmcArmingClient.Logout(arming);   // no-op if already closed
                     if (token.IsCancellationRequested)
                     {
                         // Superseded or closed: the failure is expected and belongs to no one.
@@ -1125,8 +1173,20 @@ namespace ATENtion.App
             if (_inputWired) return; // handlers read _session live, so wire only once
             _inputWired = true;
             VideoImage.MouseMove += (s, e) => SendMouse(e, isMove: true);   // coalesced (paced)
-            VideoImage.MouseDown += (s, e) => { UpdateButtons(e); VideoImage.Focus(); SendMouse(e, isMove: false); };
-            VideoImage.MouseUp += (s, e) => { UpdateButtons(e); SendMouse(e, isMove: false); };
+            // The video holds the mouse while a button is down, so a drag that ends outside it still
+            // sends the release rather than leaving the button held on the host.
+            VideoImage.MouseDown += (s, e) =>
+            {
+                UpdateButtons(e); VideoImage.Focus(); VideoImage.CaptureMouse(); SendMouse(e, isMove: false);
+            };
+            VideoImage.MouseUp += (s, e) =>
+            {
+                UpdateButtons(e); SendMouse(e, isMove: false);
+                if (_buttonMask == 0) VideoImage.ReleaseMouseCapture();
+            };
+            // Capture taken away mid-drag (a dialog, another window): the release will not come here.
+            VideoImage.LostMouseCapture += (s, e) => { if (_buttonMask != 0) ReleaseHeldButtons(_ctx); };
+            VideoImage.MouseWheel += (s, e) => SendWheel(e);
             VideoImage.Focusable = true;
             // Use the tunneling Preview events: WPF consumes KeyDown for focus navigation (arrows, Tab,
             // Esc, and so on) before the bubbling KeyDown fires, so the bubbling handlers would otherwise
@@ -1166,26 +1226,48 @@ namespace ATENtion.App
         /// be delivered to whatever took focus, leaving a latched modifier or a stuck drag.</summary>
         private void OnDeactivated(object sender, EventArgs e) => ReleaseHeldInput(_ctx);
 
+        // RFB reports the wheel as buttons 4 (up) and 5 (down), each notch a press and release.
+        private void SendWheel(MouseWheelEventArgs e)
+        {
+            if (_session?.Decoder == null) return;
+            SendMouse(e, isMove: true);   // updates the remembered position first
+            int notches = e.Delta / 120;
+            if (notches == 0) notches = Math.Sign(e.Delta);   // high-resolution wheels send smaller steps
+            int bit = notches > 0 ? 0x08 : 0x10;
+            for (int i = 0; i < Math.Min(Math.Abs(notches), 10); i++)
+            {
+                _session.SendMouse(_ctx.LastMouseX, _ctx.LastMouseY, _buttonMask | bit);
+                _session.SendMouse(_ctx.LastMouseX, _ctx.LastMouseY, _buttonMask);
+            }
+            e.Handled = true;
+        }
+
+        private static void ReleaseHeldButtons(SessionContext ctx)
+        {
+            if (ctx.ButtonMask != 0)
+                ctx.Session?.SendMouse(ctx.LastMouseX, ctx.LastMouseY, 0); // button-up in place (no move)
+            ctx.ButtonMask = 0;
+        }
+
         /// <summary>Sends an up for every key and mouse button still held on a tab's host.</summary>
         /// <remarks>Used when the window loses focus and when the user moves to another tab.</remarks>
         private static void ReleaseHeldInput(SessionContext ctx)
         {
-            var s = ctx.Session;
-            if (s == null) { ctx.ButtonMask = 0; return; }
-            s.ReleaseHeldKeys();
-            if (ctx.ButtonMask != 0)
-            {
-                s.SendMouse(ctx.LastMouseX, ctx.LastMouseY, 0); // button-up in place (no move)
-                ctx.ButtonMask = 0;
-            }
+            ctx.Session?.ReleaseHeldKeys();
+            ReleaseHeldButtons(ctx);
         }
 
         private void SendKey(KeyEventArgs e, bool down)
         {
             if (_session == null) return;
-            // WPF delivers some keys as Key.System (with e.SystemKey set), e.g. Alt-combos.
-            Key key = e.Key == Key.System ? e.SystemKey : e.Key;
-            uint keysym = KeySymMap.ToKeySym(key);
+            // WPF reports some keys under a stand-in: Alt combinations as Key.System, a dead key
+            // (the accent keys on many layouts) as DeadCharProcessed, and keys taken by an input
+            // method as ImeProcessed. The real key is in a separate property.
+            Key key = e.Key == Key.System ? e.SystemKey
+                    : e.Key == Key.DeadCharProcessed ? e.DeadCharProcessedKey
+                    : e.Key == Key.ImeProcessed ? e.ImeProcessedKey
+                    : e.Key;
+            uint keysym = KeySymFor(key);
             if (keysym != 0)
             {
                 keysym = ApplyLockKeyMarker(keysym);
@@ -1219,6 +1301,29 @@ namespace ATENtion.App
 
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         private static extern short GetKeyState(int nVirtKey);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern uint MapVirtualKeyEx(uint uCode, uint uMapType, IntPtr dwhkl);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern IntPtr GetKeyboardLayout(uint idThread);
+
+        private const uint MAPVK_VK_TO_VSC = 0;
+
+        // Layout-dependent keys go by where they are on the keyboard (see KeyPositions); the active
+        // layout says which physical key produced the virtual key. Everything else, and anything
+        // the layout cannot place, uses the fixed table.
+        private static uint KeySymFor(Key key)
+        {
+            if (KeySymMap.IsLayoutDependent(key))
+            {
+                int vk = KeyInterop.VirtualKeyFromKey(key);
+                uint scan = MapVirtualKeyEx((uint)vk, MAPVK_VK_TO_VSC, GetKeyboardLayout(0));
+                uint hid = KeyPositions.HidFromScanCode(scan);
+                if (hid != 0) return hid;
+            }
+            return KeySymMap.ToKeySym(key);
+        }
 
         private void OnRefresh(object s, RoutedEventArgs e)
         {
@@ -1296,12 +1401,7 @@ namespace ATENtion.App
         private void OnClearLog(object sender, RoutedEventArgs e)
         {
             LogBox.Clear();
-            try
-            {
-                string path = Core.Diagnostics.KvmLog.FilePath;
-                if (!string.IsNullOrEmpty(path) && System.IO.File.Exists(path)) System.IO.File.WriteAllText(path, "");
-            }
-            catch { }
+            try { Core.Diagnostics.KvmLog.Clear(); } catch { }
             FlashStatus("Log cleared.");
         }
 
@@ -1470,17 +1570,28 @@ namespace ATENtion.App
         private void Power(PowerCommand cmd)
         {
             if (_session == null) { FlashStatus("Not connected."); return; }
+            // With several tabs open, "the server" is ambiguous: name the one this goes to.
+            string target = PowerTarget(_ctx);
             // Confirm the disruptive actions. Powering on needs no guard.
             if (cmd != PowerCommand.On)
             {
                 var answer = MessageBox.Show(this,
-                    $"Send '{cmd}' to the server now?\nThis affects the running machine immediately.",
-                    "Confirm power action", MessageBoxButton.YesNo, MessageBoxImage.Warning,
+                    $"Send '{cmd}' to {target} now?\nThis affects the running machine immediately.",
+                    "Confirm power action - " + target, MessageBoxButton.YesNo, MessageBoxImage.Warning,
                     MessageBoxResult.No);
                 if (answer != MessageBoxResult.Yes) { FlashStatus("Power action cancelled."); return; }
             }
-            try { _session.SetPower(cmd); FlashStatus("Sent power: " + cmd); }
+            try { _session.SetPower(cmd); FlashStatus($"Sent power {cmd} to {target}"); }
             catch (Exception ex) { FlashStatus("Power failed: " + ex.Message); }
+        }
+
+        // The tab's name, with the address when the name is a profile name rather than the host.
+        private static string PowerTarget(SessionContext ctx)
+        {
+            string host = ctx.ConnectOptions?.Host;
+            string name = ctx.DisplayName;
+            return string.IsNullOrEmpty(host) || string.Equals(name, host, StringComparison.OrdinalIgnoreCase)
+                ? name : $"{name} ({host})";
         }
 
         private void OnHotPlug(object s, RoutedEventArgs e)
@@ -1492,10 +1603,16 @@ namespace ATENtion.App
 
         // ---- clipboard paste + send-keys (inject keystrokes the host can't otherwise receive) ----
 
+        /// <summary>Pause after each typed character, so the host's keyboard buffer keeps up.</summary>
+        private const int PasteKeyGapMs = 8;
+
+        /// <summary>Pastes of more characters than this ask first: at the paced rate they take a while.</summary>
+        private const int PasteConfirmChars = 2000;
+
         /// <summary>Types the clipboard's text into the host as keystrokes, since the host shares no
         /// clipboard with this client. Useful for passwords and commands. US layout, via
         /// <see cref="HostKeys"/>.</summary>
-        private void OnPasteToHost(object sender, RoutedEventArgs e)
+        private async void OnPasteToHost(object sender, RoutedEventArgs e)
         {
             if (_session == null) { FlashStatus("Not connected."); return; }
             string text = "";
@@ -1505,13 +1622,34 @@ namespace ATENtion.App
             {
                 FlashStatus("View-only session - keystrokes won't reach the host."); return;
             }
-            int n = 0;
-            foreach (var (hid, down) in HostKeys.TypeSequence(text))
+            var keys = HostKeys.TypeSequence(text).ToList();
+            int typed = keys.Count(k => k.down && k.hid != HostKeys.LShift);
+            int skipped = HostKeys.CountUntypable(text);
+            if (typed == 0) { FlashStatus("Nothing in the clipboard can be typed (US keyboard characters only)."); return; }
+            if (typed > PasteConfirmChars &&
+                MessageBox.Show(this, $"Type {typed:n0} characters into {PowerTarget(_ctx)}? This takes about " +
+                        $"{typed * PasteKeyGapMs / 1000 + 1} seconds.", "Paste to host",
+                        MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+                return;
+
+            // Typed at a steady pace off the UI thread. Sent all at once, a long paste arrived
+            // faster than the host's keyboard buffer drained and characters went missing. Stops if
+            // the tab reconnects or closes, rather than typing the rest into a new session.
+            var ctx = _ctx;
+            var session = _session;
+            FlashStatus($"Pasting {typed:n0} character(s)...");
+            await Task.Run(() =>
             {
-                _session.SendKey(hid, down);
-                if (down) n++;
-            }
-            FlashStatus($"Pasted {n} character(s) as keystrokes.");
+                foreach (var (hid, down) in keys)
+                {
+                    if (!ReferenceEquals(ctx.Session, session)) break;
+                    session.SendKey(hid, down);
+                    if (!down) Thread.Sleep(PasteKeyGapMs);
+                }
+            });
+            if (ReferenceEquals(ctx, _ctx))
+                FlashStatus($"Pasted {typed:n0} character(s)" +
+                            (skipped > 0 ? $"; skipped {skipped} that a US keyboard can't type." : "."));
         }
 
         /// <summary>Press the given HID usages in order, then release them in reverse - a key combo.</summary>
@@ -1579,18 +1717,20 @@ namespace ATENtion.App
         }
 
         /// <summary>Mount a local .iso as a read-only virtual CD-ROM (shared by the menu and drag-drop).</summary>
-        private void MountIso(string path)
+        private async void MountIso(string path)
         {
             if (_connectOptions == null || string.IsNullOrWhiteSpace(_connectOptions.Host))
             {
                 FlashStatus("Connect to a BMC first."); return;
             }
             if (_vmedia != null) { FlashStatus("An ISO is already mounted - unmount first."); return; }
+            if (_ctx.Mounting) { FlashStatus("A mount is already in progress."); return; }
             if (!_connectOptions.VirtualMediaEnabled)
             {
                 FlashStatus("This BMC session does not advertise virtual-media support."); return;
             }
 
+            var owner = _ctx;
             var vm = new VirtualMediaSession(new VirtualMediaOptions
             {
                 Host = _connectOptions.Host,
@@ -1601,54 +1741,74 @@ namespace ATENtion.App
                 Password = _connectOptions.KvmPassword,
                 ImagePath = path,
             });
-            // Keep the handlers in fields so ClearVmedia can detach them before Dispose - otherwise
-            // the lambdas (which close over this window) stay attached to the disposed session.
-            // Capture the owning context: these fire from the media session's thread, possibly long
-            // after the user switched tabs.
-            // BeginInvoke: these run on the media thread, which closing the tab joins.
-            var owner = _ctx;
-            _vmFaulted = (sender, ex) => Dispatcher.BeginInvoke(new Action(() =>
+            // These fire on the media thread, possibly long after the user switched tabs, so they
+            // capture the owning tab. BeginInvoke, because closing the tab joins that thread. Each
+            // ignores a session that is no longer the tab's own, including one still attaching.
+            EventHandler<Exception> faulted = (sender, ex) => Dispatcher.BeginInvoke(new Action(() =>
             {
-                if (!ReferenceEquals(owner.Vmedia, vm)) return;   // unmounted or closed since
+                if (!ReferenceEquals(owner.Vmedia, vm)) return;
                 if (ReferenceEquals(owner, _ctx))
                     FlashStatus("Virtual media error: " + ex.Message);
                 ClearVmedia(owner);
             }));
-            _vmClosed = (sender, args) => Dispatcher.BeginInvoke(new Action(() =>
+            EventHandler closed = (sender, args) => Dispatcher.BeginInvoke(new Action(() =>
             {
                 if (!ReferenceEquals(owner.Vmedia, vm)) return;
                 if (ReferenceEquals(owner, _ctx))
                     FlashStatus("Virtual media channel closed.");
                 ClearVmedia(owner);
             }));
-            vm.Faulted += _vmFaulted;
-            vm.Closed += _vmClosed;
+            vm.Faulted += faulted;
+            vm.Closed += closed;
 
-            try
+            // Attaching opens four connections in turn, each allowed ten seconds, so it runs off the
+            // UI thread. Unmounting, disconnecting or closing the tab meanwhile moves the generation
+            // on, and the finished mount is then released instead of attached.
+            string name = System.IO.Path.GetFileName(path);
+            int generation = owner.MediaGeneration;
+            owner.Mounting = true;
+            RefreshStorageMenu(owner);
+            if (ReferenceEquals(owner, _ctx)) FlashStatus($"Mounting {name}...");
+            Exception failure = null;
+            try { await Task.Run(() => { vm.Open(); vm.StartServing(); }); }
+            catch (Exception ex) { failure = ex; }
+            owner.Mounting = false;
+
+            if (failure != null || owner.IsClosed || owner.MediaGeneration != generation)
             {
-                vm.Open();
-                vm.StartServing();
-                _vmedia = vm;
-                _ctx.RaiseTabState();
-                // Media attached changes what the refresh interval costs, so say so once.
-                if (_fullFrameInterval == 0 || _fullFrameInterval > 2)
-                    Core.Diagnostics.KvmLog.Write(
-                        "Virtual media attached. This firmware only re-encodes the screen for a full " +
-                        "frame request, so the update rate is whatever View > Full frame requests is " +
-                        "set to. Choose Continuous for real motion.");
-                string name = System.IO.Path.GetFileName(path);
-                MountIsoItem.IsEnabled = false;
-                UnmountIsoItem.IsEnabled = true;
-                UnmountIsoItem.Header = $"_Unmount ({name})";
-                FlashStatus(_fullFrameInterval == 0 || _fullFrameInterval > 2
+                SessionContext.DisposeInBackground(vm);
+                RefreshStorageMenu(owner);
+                if (failure != null && ReferenceEquals(owner, _ctx)) FlashStatus("Mount failed: " + failure.Message);
+                return;
+            }
+
+            owner.Vmedia = vm;
+            owner.VmFaulted = faulted;
+            owner.VmClosed = closed;
+            owner.RaiseTabState();
+            RefreshStorageMenu(owner);
+            // Media attached changes what the refresh interval costs, so say so once.
+            bool slow = owner.FullFrameInterval == 0 || owner.FullFrameInterval > 2;
+            if (slow)
+                Core.Diagnostics.KvmLog.Write(
+                    "Virtual media attached. This firmware only re-encodes the screen for a full " +
+                    "frame request, so the update rate is whatever View > Full frame requests is " +
+                    "set to. Choose Continuous for real motion.");
+            if (ReferenceEquals(owner, _ctx))
+                FlashStatus(slow
                     ? $"Mounted {name}. For smoother video set View ▸ Full frame requests ▸ Continuous."
                     : $"Mounted {name} as virtual CD-ROM.");
-            }
-            catch (Exception ex)
-            {
-                try { vm.Dispose(); } catch { }
-                FlashStatus("Mount failed: " + ex.Message);
-            }
+        }
+
+        /// <summary>Brings the Storage menu into line with a tab, if it is the visible one.</summary>
+        private void RefreshStorageMenu(SessionContext ctx)
+        {
+            if (!ReferenceEquals(ctx, _ctx)) return;
+            MountIsoItem.IsEnabled = ctx.Vmedia == null && !ctx.Mounting;
+            UnmountIsoItem.IsEnabled = ctx.Vmedia != null;
+            UnmountIsoItem.Header = ctx.Vmedia != null
+                ? $"_Unmount ({System.IO.Path.GetFileName(ctx.Vmedia.ImagePath)})"
+                : "_Unmount";
         }
 
         private void OnUnmountIso(object s, RoutedEventArgs e)
@@ -1662,25 +1822,19 @@ namespace ATENtion.App
 
         private void ClearVmedia(SessionContext ctx)
         {
+            ctx.MediaGeneration++;   // a mount still attaching is now unwanted
             if (ctx.Vmedia != null)
             {
                 if (ctx.VmFaulted != null) try { ctx.Vmedia.Faulted -= ctx.VmFaulted; } catch { }
                 if (ctx.VmClosed != null) try { ctx.Vmedia.Closed -= ctx.VmClosed; } catch { }
-                try { ctx.Vmedia.Dispose(); } catch { }
+                SessionContext.DisposeInBackground(ctx.Vmedia);
                 ctx.Vmedia = null;
             }
             ctx.VmFaulted = null;
             ctx.VmClosed = null;
             ctx.RaiseTabState();
-            // Only the visible tab owns the Storage menu's state.
-            if (!ReferenceEquals(ctx, _ctx)) return;
-            MountIsoItem.IsEnabled = true;
-            UnmountIsoItem.IsEnabled = false;
-            UnmountIsoItem.Header = "_Unmount";
+            RefreshStorageMenu(ctx);
         }
-
-        private EventHandler<Exception> _vmFaulted { get => _ctx.VmFaulted; set => _ctx.VmFaulted = value; }
-        private EventHandler _vmClosed { get => _ctx.VmClosed; set => _ctx.VmClosed = value; }
 
         // Accept a single .iso dragged onto the video to mount it as a virtual CD-ROM.
         private void OnVideoDragOver(object sender, DragEventArgs e)

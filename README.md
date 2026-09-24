@@ -42,11 +42,13 @@ across the X9, X10, and X11 generations should work, but remain untested.
 - Virtual media: mount a local `.iso` as a read-only CD-ROM, by menu or by dragging the
   file onto the video.
 - Screenshots of the current frame, saved as PNG.
-- Paste the clipboard into the host as keystrokes.
+- Paste the clipboard into the host as keystrokes (US keyboard characters, typed at a
+  steady pace).
 - Send-key macros: Alt+Tab, Alt+F4, Alt+Space, Ctrl+Esc, the Windows key, Print Screen,
   and any arbitrary custom combination.
 - View options: fullscreen, fit-to-window, actual size (1:1), and smooth or crisp scaling.
-- Auto-reconnect after a dropped link.
+- Auto-reconnect after a dropped link, for long enough to ride out a BMC reboot. A mounted
+  ISO stays mounted through the reconnect.
 - A live Session Info panel (endpoint, transport, resolution, control state, frame rate,
   throughput, uptime).
 - Optional diagnostic logging, off by default.
@@ -199,7 +201,9 @@ systems use, so it covers the common cases. Relative and Single modes are not do
 ### How do I mount an ISO?
 
 Use Storage > Mount ISO, or drag an `.iso` file onto the video. It appears to the host as
-a read-only CD-ROM. Unmount it from the Storage menu.
+a read-only CD-ROM. Unmount it from the Storage menu. It stays mounted if the video
+connection drops and reconnects, so an install from it carries on; Connection > Disconnect,
+changing to another server, or closing the tab unmounts it.
 
 ### Where are my settings and BMC passwords stored?
 
@@ -211,7 +215,9 @@ with DPAPI scoped to your Windows user and is never stored in the clear.
 ### What is in the log file, and is it safe to share?
 
 Logging is off by default. Passwords, JNLP credentials, cookies, and CSRF tokens are
-redacted. A log can still contain your BMC IP address, hostname, account name, client IP,
+redacted, and keystrokes are logged only as "key down" or "key up", never which key, so
+what you type on the host (passwords included) does not reach the file. The file is
+limited to 10 MB, with one previous file kept as `.old.log`. A log can still contain your BMC IP address, hostname, account name, client IP,
 and console metadata, so review it before sharing. The repository ignores `*.log`.
 
 ### Will it work on my board?

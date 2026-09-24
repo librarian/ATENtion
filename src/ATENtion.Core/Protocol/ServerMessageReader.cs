@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using ATENtion.Core.Net;
 using ATENtion.Core.Video;
@@ -51,6 +52,8 @@ namespace ATENtion.Core.Protocol
         /// <summary>The privilege record's index. The BMC sends one record per active session,
         /// counting down, so the first of a burst carries the session count and the last is 1.</summary>
         public uint PrivilegeIndex;
+        /// <summary>Why a rectangle in this update could not be decoded, or null.</summary>
+        public string DecodeError;
     }
 
     /// <summary>
@@ -121,7 +124,6 @@ namespace ATENtion.Core.Protocol
         public static ServerMessageResult ConsumeOne(BufferedRfbStream s, AtenTileDecoder decoder)
         {
             byte type = s.ReadU8();
-            ATENtion.Core.Diagnostics.KvmLog.Write($"recv: message-type byte 0x{type:x2}");
             var result = new ServerMessageResult { Type = type };
 
             switch (type)
@@ -163,6 +165,17 @@ namespace ATENtion.Core.Protocol
                             // enabled, retain the first complete packet for offline codec analysis.
                             ATENtion.Core.Diagnostics.KvmLog.TryCaptureUnsupportedFrame(rect.Payload);
                             ATENtion.Core.Diagnostics.KvmLog.Write("  decode skipped: " + ex.Message);
+                            result.DecodeError = ex.Message;
+                        }
+                        catch (Exception ex) when (!(ex is OutOfMemoryException))
+                        {
+                            // A malformed rectangle, or a decoder that cannot load. The bytes are
+                            // consumed either way, so skipping keeps the stream aligned; ending the
+                            // session would only reconnect into the same failure.
+                            ATENtion.Core.Diagnostics.KvmLog.Write($"  decode failed: {ex.GetType().Name}: {ex.Message}");
+                            result.DecodeError = ex is DllNotFoundException || ex is BadImageFormatException
+                                ? "the video decoder library could not be loaded (" + ex.Message + ")"
+                                : ex.Message;
                         }
                     }
                     result.Dirty = dirty;
