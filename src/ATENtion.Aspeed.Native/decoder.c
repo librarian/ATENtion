@@ -84,6 +84,9 @@ static unsigned char first_frame = 1;
 // input compressed data
 static uint32_t* in_buf;
 static uint32_t in_buf_index;
+// Whole words available in in_buf. Reads past it return zero bits rather than reading beyond the
+// caller's buffer: a truncated or malformed packet then decodes as garbage, not as an over-read.
+static uint32_t in_buf_words;
 
 // how many bits of 32-bit data pointed by 'in_buf_index' is not skipped yet
 static int newbits;
@@ -533,7 +536,8 @@ static WORD ShowBits(BYTE bits)
 static void SkipBits(BYTE bits)
 {
     if (newbits <= bits) {
-        uint32_t data = in_buf[in_buf_index++];
+        uint32_t data = in_buf_index < in_buf_words ? in_buf[in_buf_index] : 0;
+        in_buf_index++;
 
         cur_data = (cur_data << bits) | ((next_data | (data >> (newbits))) >> (32 - bits));
         next_data = data << (bits - newbits);
@@ -983,10 +987,14 @@ static void MoveBlockIndex(int *mbx, int *mby)
     }
 }
 
-static void UpdateXY(int *mbx, int *mby)
+// Returns 0 when the block position read from the stream lies outside the frame. The position is
+// 8 bits each way, so without this check a malformed packet writes up to 255 blocks past the
+// output and 2-pass buffers.
+static int UpdateXY(int *mbx, int *mby)
 {
     *mbx = (cur_data & 0x0FF00000) >> 20;
     *mby = (cur_data & 0x0FF000) >> 12;
+    return *mbx < mbwidth && *mby < mbheight;
 }
 
 static void DecodeVqColors(struct ColorCache *vq, BYTE count)
@@ -1045,7 +1053,8 @@ static void DecodeBuffer(int len, BYTE *out_buf)
             return;
         case JPEG_SKIP_CODE:
             //pr_dbg("(%d, %d): skip\n", mbx, mby);
-            UpdateXY(&mbx, &mby);
+            if (!UpdateXY(&mbx, &mby))
+                return;
 
             SkipBits(BLOCK_AST2100_SKIP_LENGTH);
             Decompress(mbx, mby, out_buf, 0);
@@ -1059,7 +1068,8 @@ static void DecodeBuffer(int len, BYTE *out_buf)
             break;
         case JPEG_SKIP_PASS2_CODE:
             //pr_dbg("(%d, %d): skip pass2\n", mbx, mby);
-            UpdateXY(&mbx, &mby);
+            if (!UpdateXY(&mbx, &mby))
+                return;
 
             SkipBits(BLOCK_AST2100_SKIP_LENGTH);
             DecompressPASS2(mbx, mby, out_buf, 2);
@@ -1081,7 +1091,8 @@ static void DecodeBuffer(int len, BYTE *out_buf)
         case VQ_SKIP_4_COLOR_CODE: {
             BYTE count = (BYTE)(1u << (((cur_data >> 28) & BLOCK_HEADER_MASK) -
                                       VQ_SKIP_1_COLOR_CODE));
-            UpdateXY(&mbx, &mby);
+            if (!UpdateXY(&mbx, &mby))
+                return;
             SkipBits(BLOCK_AST2100_SKIP_LENGTH);
             DecodeVqColors(&vq, count);
             DecompressVq(mbx, mby, out_buf, &vq);
@@ -1173,6 +1184,11 @@ ASPEED_EXPORT void aspeed_decode(uint32_t* _in_buf, int _len, unsigned char* _ou
 {
     pr_dbg("len(%d) 420(%d) width(%d) height(%d)\n", _len, _mode420, _width, _height);
 
+    /* The 2-pass buffer is sized for 1920x1200; two words are read before the first bounds check. */
+    if (_in_buf == NULL || _out_buf == NULL || yuv_buf == NULL || _len < 8 ||
+        _width <= 0 || _height <= 0 || (long)_width * _height > 1920L * 1200)
+        return;
+
     if (first_frame == 1 || _sel != selector || _adv_sel != advance_selector) {
         pr_dbg("init table for sel(%d) adv_sel(%d)\n", selector, advance_selector);
 
@@ -1198,6 +1214,7 @@ ASPEED_EXPORT void aspeed_decode(uint32_t* _in_buf, int _len, unsigned char* _ou
         mbheight = ALIGN(height, 8) / 8;
     }
     in_buf = _in_buf;
+    in_buf_words = (uint32_t)(_len / (int)sizeof(*in_buf));
 
     cur_data = in_buf[0];
     next_data = in_buf[1];
