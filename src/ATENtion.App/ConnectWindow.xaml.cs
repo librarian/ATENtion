@@ -48,6 +48,7 @@ namespace ATENtion.App
 
         private List<ConnectSettings> _profiles;
         private string _editingProfileId = "";
+        private string _loadedName = "";
         private bool _loadingProfile;
 
         /// <summary>Builds the dialog, restoring the last-entered values and applying the arm gating.</summary>
@@ -79,6 +80,7 @@ namespace ATENtion.App
             try
             {
                 _editingProfileId = value?.Id ?? "";
+                _loadedName = value?.Name ?? "";
                 ProfileNameBox.Text = value?.Name ?? "";
                 HostBox.Text = value?.Host ?? "";
                 UserBox.Text = string.IsNullOrEmpty(value?.User) ? "ADMIN" : value.User;
@@ -115,7 +117,13 @@ namespace ATENtion.App
                     MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
                 return;
 
-            ConnectSettings.Delete(_editingProfileId);
+            try { ConnectSettings.Delete(_editingProfileId); }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, "The server could not be deleted: " + ex.Message, "Delete failed",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
             _profiles = ConnectSettings.LoadProfiles();
             ProfileBox.ItemsSource = _profiles;
             if (_profiles.Count > 0)
@@ -152,7 +160,30 @@ namespace ATENtion.App
         // bundled stunnel and its client.crt/key). The same public vendor certificate ships in every
         // iKVM jar (CN=IPMI, O=Super Micro Computer), so it is embedded in the binary. A client.pfx next
         // to the executable overrides it, for a renewed certificate or a different firmware generation.
-        private static X509Certificate2 LoadClientCert()
+        /// <summary>Builds connection options for a saved profile without showing the dialog.</summary>
+        /// <remarks>Tokens are not persisted, so a profile that does not arm via the web has none.</remarks>
+        internal static KvmConnectionOptions OptionsFor(ConnectSettings profile)
+        {
+            if (!int.TryParse(profile.Port, out int port)) port = 5900;
+            return new KvmConnectionOptions
+            {
+                Host = ConnectSettings.NormalizeHost(profile.Host),
+                Port = port,
+                Token = profile.Token ?? "",
+                UseTls = profile.Tls,
+                ClientCertificate = LoadClientCert(),
+            };
+        }
+
+        // Loaded once per run. Each load with MachineKeySet writes a key file into the machine key
+        // store that stays until the certificate is finalised, and connects and restored tabs each
+        // loaded their own.
+        private static readonly Lazy<X509Certificate2> ClientCert =
+            new Lazy<X509Certificate2>(LoadClientCertOnce, System.Threading.LazyThreadSafetyMode.ExecutionAndPublication);
+
+        private static X509Certificate2 LoadClientCert() => ClientCert.Value;
+
+        private static X509Certificate2 LoadClientCertOnce()
         {
             // 1. A disk override next to the executable.
             try
@@ -211,7 +242,7 @@ namespace ATENtion.App
             ArmViaWeb = ArmBox.IsChecked == true;
             BmcUser = UserBox.Text.Trim();
             BmcPassword = PassBox.Password;
-            string host = HostBox.Text.Trim();
+            string host = ConnectSettings.NormalizeHost(HostBox.Text);
             if (string.IsNullOrEmpty(host))
             {
                 MessageBox.Show(this, "Enter a BMC host name or IP address.", "Host required",
@@ -228,8 +259,8 @@ namespace ATENtion.App
                 ClientCertificate = LoadClientCert(),
             };
 
-            // Save the editable profile immediately. If a credential is wrong, Connection > Connect /
-            // Change server opens this same profile so the user can correct it before another attempt.
+            // Save immediately, so a wrong credential can be corrected from Connection > Connect /
+            // Change server. A different address saves as a new profile rather than over this one.
             Profile = new ConnectSettings
             {
                 Id = _editingProfileId,
@@ -242,7 +273,15 @@ namespace ATENtion.App
                 Arm = ArmViaWeb,
                 Tls = TlsBox.IsChecked == true,
             };
-            Profile.Save();
+            Profile.ResolveIdentity(_loadedName);
+            try { Profile.Save(); }
+            catch (Exception ex)
+            {
+                // Connecting still works; only remembering the server failed.
+                Core.Diagnostics.KvmLog.Error("saving server profile", ex);
+                MessageBox.Show(this, "The server details could not be saved: " + ex.Message +
+                    "\n\nConnecting anyway.", "Save failed", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
 
             DialogResult = true;
             Close();

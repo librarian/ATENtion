@@ -19,7 +19,7 @@ ATEN Java iKVM viewer, launched through Java Web Start. That path has aged badly
   not run at all without an old JRE or OpenWebStart.
 - Every session is a fresh `.jnlp` file full of single-use tokens that expire, so you
   re-download it from the web UI each time.
-- You click through Java security prompts on every launch (assuming you've modified 
+- You click through Java security prompts on every launch (assuming you've modified
   `java.security` correctly to even permit clicking through).
 - The viewer is clunky, and the bundled TLS certificates have since expired,
   which breaks the connection outright on a correct clock.
@@ -37,16 +37,27 @@ across the X9, X10, and X11 generations should work, but remain untested.
 ## Features
 
 - Live video, keyboard, and mouse over the console.
+- Several consoles at once, as tabs. Tabs can be reordered by dragging and are reopened
+  at startup. A hidden tab stops streaming but keeps checking its host, unless View >
+  Keep background tabs streaming is on.
+- A power symbol on each tab: green when the BMC reports the host on, grey when it is off.
+- A User List of everyone on the console, with a status-bar notice when someone connects
+  or disconnects.
 - Mouse in Absolute mode (the pointer mode BIOS, UEFI, and most operating systems expect).
 - Power control: On, Off, Reset, and Soft Off (ACPI), plus Ctrl+Alt+Del.
 - Virtual media: mount a local `.iso` as a read-only CD-ROM, by menu or by dragging the
-  file onto the video.
+  file onto the video. The Storage menu shows when another session already has a disc
+  mounted.
 - Screenshots of the current frame, saved as PNG.
-- Paste the clipboard into the host as keystrokes.
+- Paste the clipboard into the host as keystrokes (US keyboard characters, typed at a
+  steady pace).
 - Send-key macros: Alt+Tab, Alt+F4, Alt+Space, Ctrl+Esc, the Windows key, Print Screen,
   and any arbitrary custom combination.
 - View options: fullscreen, fit-to-window, actual size (1:1), and smooth or crisp scaling.
-- Auto-reconnect after a dropped link.
+- Video options: how often a full frame is requested (see the FAQ on slow updates), the
+  BMC's display preference (4:4:4 or 4:2:2 and image quality), and a frame rate limit.
+- Auto-reconnect after a dropped link, for long enough to ride out a BMC reboot. A mounted
+  ISO stays mounted through the reconnect.
 - A live Session Info panel (endpoint, transport, resolution, control state, frame rate,
   throughput, uptime).
 - Optional diagnostic logging, off by default.
@@ -136,7 +147,7 @@ multi-connection attach handshake.
 - `src/ATENtion.App` - the WPF application and its windows.
 - `src/ATENtion.Capture` - the command-line login and screenshot client.
 - `src/ATENtion.Aspeed.Native` - ASPEED's MPL-2.0 reference decoder and Windows x64 DLL.
-- `tests/ATENtion.App.Tests` - Windows UI settings and connection-profile persistence tests.
+- `tests/ATENtion.App.Tests` - settings, connection profiles, tabs, and input-mapping tests.
 - `tests/ATENtion.Tests` - the unit tests.
 
 ## License
@@ -199,7 +210,9 @@ systems use, so it covers the common cases. Relative and Single modes are not do
 ### How do I mount an ISO?
 
 Use Storage > Mount ISO, or drag an `.iso` file onto the video. It appears to the host as
-a read-only CD-ROM. Unmount it from the Storage menu.
+a read-only CD-ROM. Unmount it from the Storage menu. It stays mounted if the video
+connection drops and reconnects, so an install from it carries on; Connection > Disconnect,
+changing to another server, or closing the tab unmounts it.
 
 ### Where are my settings and BMC passwords stored?
 
@@ -211,13 +224,32 @@ with DPAPI scoped to your Windows user and is never stored in the clear.
 ### What is in the log file, and is it safe to share?
 
 Logging is off by default. Passwords, JNLP credentials, cookies, and CSRF tokens are
-redacted. A log can still contain your BMC IP address, hostname, account name, client IP,
-and console metadata, so review it before sharing. The repository ignores `*.log`.
+redacted, and keystrokes are logged only as "key down" or "key up", never which key, so
+what you type on the host (passwords included) does not reach the file. The file is
+limited to 10 MB, with one previous file kept as `.old.log`. A log can still contain your
+BMC IP address, hostname, account name, client IP, and console metadata, so review it
+before sharing. The repository ignores `*.log`.
 
 ### Will it work on my board?
 
-It has only been verified on the X9DRH-7F. Other ATEN/Pilot-based Supermicro BMCs should
-work, but they are untested.
+It has been verified on the X9DRH-7F and on AST2400-based X10 boards. Other
+ATEN/Pilot-based Supermicro BMCs should work, but they are untested.
+
+### What does the power symbol on each tab mean?
+
+Green means the BMC reports the host powered on, including when it is on but showing no
+picture. Grey means it is off, or that nothing is known yet. Hover over it for details.
+Hidden tabs check every 10 seconds, so the symbol stays current without the tab being
+open. A BMC that does not report power (possibly older boards) falls back to the video
+signal: green while there is a picture.
+
+### Why does the screen update slowly, or only every few seconds?
+
+On ATEN/ASPEED firmware the BMC only encodes a fresh picture when asked for a full frame;
+the cheaper incremental requests are answered from its last encode. View > Full frame
+requests sets how often a full frame is asked for. The default, every 5 seconds, is light
+on bandwidth; Continuous gives real motion (typing, boot screens, installers) at roughly
+7 Mbps for a 1024x768 screen.
 
 ### I am connected but the screen is black.
 

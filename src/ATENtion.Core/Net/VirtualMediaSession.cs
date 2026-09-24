@@ -87,6 +87,19 @@ namespace ATENtion.Core.Net
         private Thread _serveThread;
         private readonly object _sendLock = new object();
         private volatile bool _running;
+        private Timer _keepAliveTimer;
+
+        /// <summary>Control frame type of the health request the BMC accepts as session liveness.</summary>
+        private const uint HealthControlType = 8;
+
+        /// <summary>
+        /// The BMC drops the session after roughly thirty seconds of silence on the data channel,
+        /// so stay comfortably below that.
+        /// </summary>
+        private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(10);
+
+        // A write blocked this long means the link is gone; it faults rather than hold the lock.
+        private const int SendTimeoutMs = 30000;
 
         /// <summary>Creates a virtual-media session bound to the given options.</summary>
         /// <param name="options">The host, port, and ISO image to serve.</param>
@@ -123,26 +136,53 @@ namespace ATENtion.Core.Net
             KvmLog.Write("vmedia: authenticated ISO attach accepted.");
         }
 
+        /// <summary>Reads which of the BMC's virtual-media slots hold media, without attaching anything.</summary>
+        /// <remarks>
+        /// One health exchange on its own connection, the same the attach starts with. Needs no
+        /// credentials. Returns null if the reply has an unexpected shape.
+        /// </remarks>
+        public static VirtualMediaSlots ProbeSlots(VirtualMediaOptions options)
+        {
+            var probe = new VirtualMediaSession(options);
+            using (Channel health = probe.OpenChannel("status"))
+            {
+                SendControl(health.Stream, 8);
+                return VirtualMediaSlots.Parse(ReadControl(health.Stream, 9));
+            }
+        }
+
         private Channel OpenChannel(string purpose)
         {
             KvmLog.Write($"vmedia: opening {purpose} channel to {_options.Host}:{_options.Port} " +
                          $"({(_options.UseTls ? "TLS" : "plaintext")})...");
-            var tcp = new TcpClient { NoDelay = true }; // native sets TCP_NODELAY and 0x88b80 send/recv buffers
-            tcp.SendBufferSize = 0x88b80;
-            tcp.ReceiveBufferSize = 0x88b80;
-            if (!tcp.ConnectAsync(_options.Host, _options.Port).Wait(_options.ConnectTimeoutMs))
-                throw new TimeoutException($"Timed out connecting to {_options.Host}:{_options.Port}.");
-            Stream transport = tcp.GetStream();
-            if (_options.UseTls)
+            // Native sets TCP_NODELAY and 0x88b80 send/recv buffers.
+            var tcp = TcpConnect.Open(_options.Host, _options.Port, _options.ConnectTimeoutMs, t =>
             {
-                var ssl = new SslStream(transport, false, AcceptServerCertificate);
-                var certificates = new X509CertificateCollection();
-                if (_options.ClientCertificate != null) certificates.Add(_options.ClientCertificate);
-                ssl.AuthenticateAsClient(_options.Host, certificates, SslProtocols.Tls12, false);
-                transport = ssl;
-                KvmLog.Write($"vmedia: TLS established: {ssl.SslProtocol}, cipher {ssl.CipherAlgorithm}.");
+                t.SendBufferSize = 0x88b80;
+                t.ReceiveBufferSize = 0x88b80;
+            });
+            try
+            {
+                // Bounded for the attach exchange; the data channel lifts the read limit once serving.
+                tcp.ReceiveTimeout = _options.ConnectTimeoutMs;
+                tcp.SendTimeout = SendTimeoutMs;
+                Stream transport = tcp.GetStream();
+                if (_options.UseTls)
+                {
+                    var ssl = new SslStream(transport, false, AcceptServerCertificate);
+                    var certificates = new X509CertificateCollection();
+                    if (_options.ClientCertificate != null) certificates.Add(_options.ClientCertificate);
+                    ssl.AuthenticateAsClient(_options.Host, certificates, SslProtocols.Tls12, false);
+                    transport = ssl;
+                    KvmLog.Write($"vmedia: TLS established: {ssl.SslProtocol}, cipher {ssl.CipherAlgorithm}.");
+                }
+                return new Channel(tcp, transport);
             }
-            return new Channel(tcp, transport);
+            catch
+            {
+                tcp.Close();
+                throw;
+            }
         }
 
         private void PerformAttachHandshake()
@@ -154,6 +194,9 @@ namespace ATENtion.Core.Net
                 SendControl(health.Stream, 8);
                 byte[] initialHealth = ReadControl(health.Stream, 9);
                 KvmLog.Write("vmedia: health exchange accepted: " + KvmLog.Hex(initialHealth));
+                // Refuse before attaching rather than let the BMC turn the attach down.
+                if (VirtualMediaSlots.Parse(initialHealth)?.InUse(VirtualMediaSlots.OwnSlot) == true)
+                    throw VirtualMediaRefusedException.SlotTaken();
             }
 
             using (Channel initialization = OpenChannel("initialization"))
@@ -180,9 +223,7 @@ namespace ATENtion.Core.Net
             byte[] mountStatus = ReadControl(_stream, 2);
             KvmLog.Write("vmedia: mount status: " + KvmLog.Hex(mountStatus));
             if (mountStatus.Length < 1 || mountStatus[0] != 0)
-                throw new InvalidDataException(
-                    $"BMC rejected the virtual-media attach with status " +
-                    $"{(mountStatus.Length == 0 ? -1 : mountStatus[0])}.");
+                throw VirtualMediaRefusedException.ForStatus(mountStatus.Length == 0 ? -1 : mountStatus[0]);
             KvmLog.Write("vmedia: authenticated device record accepted.");
 
             // Native device-worker acknowledgement for all three virtual USB slots.
@@ -239,9 +280,34 @@ namespace ATENtion.Core.Net
         public void StartServing()
         {
             if (_stream == null) throw new InvalidOperationException("Call Open() first.");
+            // The host only reads while it wants data, so silence on the data channel is normal.
+            _tcp.ReceiveTimeout = 0;
             _running = true;
             _serveThread = new Thread(ServeLoop) { IsBackground = true, Name = "vmedia-serve" };
             _serveThread.Start();
+
+            // A guest only issues SCSI commands while actually reading, so an idle disc would
+            // otherwise let the channel fall silent and be dropped.
+            _keepAliveTimer = new Timer(_ => SendKeepAlive(), null,
+                                        KeepAliveInterval, KeepAliveInterval);
+        }
+
+        // Must be the data channel: an exchange on a separately opened health channel does not
+        // reset the BMC's timer.
+        private void SendKeepAlive()
+        {
+            if (!_running) return;
+            try
+            {
+                lock (_sendLock) SendControl(HealthControlType);
+            }
+            catch (Exception ex)
+            {
+                if (!_running) return;
+                KvmLog.Error("vmedia keepalive", ex);
+                _running = false;
+                Faulted?.Invoke(this, ex);
+            }
         }
 
         private void ServeLoop()
@@ -345,7 +411,15 @@ namespace ATENtion.Core.Net
         public void Dispose()
         {
             _running = false;
-            try { if (_stream != null) SendControl(5); } catch { }
+            try { _keepAliveTimer?.Dispose(); } catch { }
+            _keepAliveTimer = null;
+            // Under the send lock: the serve thread or a keepalive may be mid-write on the same stream.
+            // A writer stuck on a dead link is not waited out; the socket close below ends it.
+            if (_stream != null && Monitor.TryEnter(_sendLock, 1000))
+            {
+                try { SendControl(5); } catch { }
+                finally { Monitor.Exit(_sendLock); }
+            }
             // The BMC normally answers type 5 with type 6, which lets the serve loop finish cleanly.
             // If it does not, close the socket after a short grace period to unblock the read.
             try { _serveThread?.Join(1000); } catch { }

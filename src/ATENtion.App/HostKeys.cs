@@ -110,6 +110,16 @@ namespace ATENtion.App
             }
         }
 
+        /// <summary>Characters in <paramref name="text"/> that <see cref="TypeSequence"/> leaves out.</summary>
+        /// <remarks>Carriage returns are not counted: a CR LF pair is typed as one Enter.</remarks>
+        public static int CountUntypable(string text)
+        {
+            int n = 0;
+            foreach (char c in text ?? "")
+                if (c != '\r' && !TryMapChar(c, out _, out _)) n++;
+            return n;
+        }
+
         /// <summary>
         /// Expands a string into the key-event sequence that types it, holding Shift across a run and
         /// releasing it only when the required shift state changes.

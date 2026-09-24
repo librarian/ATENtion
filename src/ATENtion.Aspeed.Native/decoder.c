@@ -38,10 +38,12 @@
 #define BLOCK_AST2100_START_LENGTH 0x04
 #define BLOCK_AST2100_SKIP_LENGTH 20 // S:1 H:3 X:8 Y:8
 
+// Field order is the output byte order: the managed FrameBuffer is BGRA and is handed
+// straight to a WPF Bgra32 WriteableBitmap without a swizzle, so blue must come first.
 struct RGB {
-    BYTE R;
-    BYTE G;
     BYTE B;
+    BYTE G;
+    BYTE R;
     BYTE Reserved;
 };
 struct YUV {
@@ -82,6 +84,14 @@ static unsigned char first_frame = 1;
 // input compressed data
 static uint32_t* in_buf;
 static uint32_t in_buf_index;
+// Whole words available in in_buf. Reads past it return zero bits rather than reading beyond the
+// caller's buffer: a truncated or malformed packet then decodes as garbage, not as an over-read.
+static uint32_t in_buf_words;
+
+// One byte per macroblock, set when the decode writes that block, so the caller can repaint only
+// what changed. NULL when the caller does not track blocks.
+static unsigned char* block_map;
+static int block_map_len;
 
 // how many bits of 32-bit data pointed by 'in_buf_index' is not skipped yet
 static int newbits;
@@ -531,7 +541,8 @@ static WORD ShowBits(BYTE bits)
 static void SkipBits(BYTE bits)
 {
     if (newbits <= bits) {
-        uint32_t data = in_buf[in_buf_index++];
+        uint32_t data = in_buf_index < in_buf_words ? in_buf[in_buf_index] : 0;
+        in_buf_index++;
 
         cur_data = (cur_data << bits) | ((next_data | (data >> (newbits))) >> (32 - bits));
         next_data = data << (bits - newbits);
@@ -556,6 +567,14 @@ static SHORT GetBits(BYTE bits)
     return signed_wordvalue;
 }
 
+static void MarkBlock(int mbx, int mby)
+{
+    int i;
+    if (block_map == NULL) return;
+    i = mby * mbwidth + mbx;
+    if (i >= 0 && i < block_map_len) block_map[i] = 1;
+}
+
 static void YUVToRGB(
     int mbx, int mby,
     unsigned char* pYCbCr, //in, Y: 256 or 64 bytes; Cb: 64 bytes; Cr: 64 bytes
@@ -570,6 +589,7 @@ static void YUVToRGB(
     WORD pixel_x, pixel_y;
     WORD tmp_x, tmp_y;
 
+    MarkBlock(mbx, mby);
     if (mode420 == 0) {
         py = pYCbCr;
         pcb = pYCbCr + 64;
@@ -646,6 +666,7 @@ static void YUVToRGBPass2(
         pr_dbg("pass2 not supported in yuv420\n");
         return;
     }
+    MarkBlock(mbx, mby);
 
     py = pYCbCr;
     pcb = pYCbCr + 64;
@@ -981,10 +1002,14 @@ static void MoveBlockIndex(int *mbx, int *mby)
     }
 }
 
-static void UpdateXY(int *mbx, int *mby)
+// Returns 0 when the block position read from the stream lies outside the frame. The position is
+// 8 bits each way, so without this check a malformed packet writes up to 255 blocks past the
+// output and 2-pass buffers.
+static int UpdateXY(int *mbx, int *mby)
 {
     *mbx = (cur_data & 0x0FF00000) >> 20;
     *mby = (cur_data & 0x0FF000) >> 12;
+    return *mbx < mbwidth && *mby < mbheight;
 }
 
 static void DecodeVqColors(struct ColorCache *vq, BYTE count)
@@ -1043,7 +1068,8 @@ static void DecodeBuffer(int len, BYTE *out_buf)
             return;
         case JPEG_SKIP_CODE:
             //pr_dbg("(%d, %d): skip\n", mbx, mby);
-            UpdateXY(&mbx, &mby);
+            if (!UpdateXY(&mbx, &mby))
+                return;
 
             SkipBits(BLOCK_AST2100_SKIP_LENGTH);
             Decompress(mbx, mby, out_buf, 0);
@@ -1057,7 +1083,8 @@ static void DecodeBuffer(int len, BYTE *out_buf)
             break;
         case JPEG_SKIP_PASS2_CODE:
             //pr_dbg("(%d, %d): skip pass2\n", mbx, mby);
-            UpdateXY(&mbx, &mby);
+            if (!UpdateXY(&mbx, &mby))
+                return;
 
             SkipBits(BLOCK_AST2100_SKIP_LENGTH);
             DecompressPASS2(mbx, mby, out_buf, 2);
@@ -1079,7 +1106,8 @@ static void DecodeBuffer(int len, BYTE *out_buf)
         case VQ_SKIP_4_COLOR_CODE: {
             BYTE count = (BYTE)(1u << (((cur_data >> 28) & BLOCK_HEADER_MASK) -
                                       VQ_SKIP_1_COLOR_CODE));
-            UpdateXY(&mbx, &mby);
+            if (!UpdateXY(&mbx, &mby))
+                return;
             SkipBits(BLOCK_AST2100_SKIP_LENGTH);
             DecodeVqColors(&vq, count);
             DecompressVq(mbx, mby, out_buf, &vq);
@@ -1104,10 +1132,93 @@ ASPEED_EXPORT void aspeed_init(void)
     InitTable();
 }
 
+/*
+ * Per-session decoder state: the 2-pass reference buffer, the quantisation tables and the selectors
+ * they derive from all carry over between frames, so concurrent sessions sharing them decode each
+ * other's state. Everything else is rebuilt per call or read-only after aspeed_init.
+ *
+ * Swapped into the globals around the existing decode body rather than threaded through every
+ * function. Calls are still serialised by the caller.
+ */
+ASPEED_EXPORT void aspeed_decode(uint32_t*, int, unsigned char*, int, int, unsigned, unsigned, unsigned);
+
+struct aspeed_ctx {
+    struct YUV* yuv_buf;
+    int32_t QT[4][64];
+    unsigned char selector;
+    unsigned char advance_selector;
+    unsigned char first_frame;
+};
+
+ASPEED_EXPORT void* aspeed_ctx_new(void)
+{
+    struct aspeed_ctx* c = calloc(1, sizeof(*c));
+    if (c == NULL) return NULL;
+    c->yuv_buf = malloc((size_t)1920 * 1200 * 3);
+    if (c->yuv_buf == NULL) { free(c); return NULL; }
+    c->first_frame = 1;          /* force the quantisation tables to load on the first frame */
+    return c;
+}
+
+ASPEED_EXPORT void aspeed_ctx_free(void* ctx)
+{
+    struct aspeed_ctx* c = (struct aspeed_ctx*)ctx;
+    if (c == NULL) return;
+    free(c->yuv_buf);
+    free(c);
+}
+
+ASPEED_EXPORT void aspeed_decode_ctx(void* ctx, uint32_t* _in_buf, int _len, unsigned char* _out_buf,
+    int _width, int _height, unsigned _mode420, unsigned _sel, unsigned _adv_sel)
+{
+    struct aspeed_ctx* c = (struct aspeed_ctx*)ctx;
+    struct YUV* saved_yuv;
+    unsigned char saved_sel, saved_adv, saved_first;
+
+    if (c == NULL) {
+        aspeed_decode(_in_buf, _len, _out_buf, _width, _height, _mode420, _sel, _adv_sel);
+        return;
+    }
+
+    /* swap this session's state in */
+    saved_yuv = yuv_buf; saved_sel = selector; saved_adv = advance_selector; saved_first = first_frame;
+    yuv_buf = c->yuv_buf; selector = c->selector; advance_selector = c->advance_selector;
+    first_frame = c->first_frame;
+    memcpy(QT, c->QT, sizeof(QT));
+
+    aspeed_decode(_in_buf, _len, _out_buf, _width, _height, _mode420, _sel, _adv_sel);
+
+    /* and back out, keeping whatever the decode updated */
+    c->selector = selector; c->advance_selector = advance_selector; c->first_frame = first_frame;
+    memcpy(c->QT, QT, sizeof(QT));
+    yuv_buf = saved_yuv; selector = saved_sel; advance_selector = saved_adv; first_frame = saved_first;
+}
+
+/*
+ * As aspeed_decode_ctx, and also records which macroblocks the frame wrote: map receives one byte
+ * per block, row-major, with blocks 16 pixels square in 4:2:0 and 8 in 4:4:4. The caller clears it.
+ * An incremental frame on a still screen writes few or none, so only those need repainting.
+ */
+ASPEED_EXPORT void aspeed_decode_ctx_map(void* ctx, uint32_t* _in_buf, int _len, unsigned char* _out_buf,
+    int _width, int _height, unsigned _mode420, unsigned _sel, unsigned _adv_sel,
+    unsigned char* map, int map_len)
+{
+    block_map = map;
+    block_map_len = map_len;
+    aspeed_decode_ctx(ctx, _in_buf, _len, _out_buf, _width, _height, _mode420, _sel, _adv_sel);
+    block_map = NULL;
+    block_map_len = 0;
+}
+
 ASPEED_EXPORT void aspeed_decode(uint32_t* _in_buf, int _len, unsigned char* _out_buf, int _width, int _height,
     unsigned _mode420, unsigned _sel, unsigned _adv_sel)
 {
     pr_dbg("len(%d) 420(%d) width(%d) height(%d)\n", _len, _mode420, _width, _height);
+
+    /* The 2-pass buffer is sized for 1920x1200; two words are read before the first bounds check. */
+    if (_in_buf == NULL || _out_buf == NULL || yuv_buf == NULL || _len < 8 ||
+        _width <= 0 || _height <= 0 || (long)_width * _height > 1920L * 1200)
+        return;
 
     if (first_frame == 1 || _sel != selector || _adv_sel != advance_selector) {
         pr_dbg("init table for sel(%d) adv_sel(%d)\n", selector, advance_selector);
@@ -1134,6 +1245,7 @@ ASPEED_EXPORT void aspeed_decode(uint32_t* _in_buf, int _len, unsigned char* _ou
         mbheight = ALIGN(height, 8) / 8;
     }
     in_buf = _in_buf;
+    in_buf_words = (uint32_t)(_len / (int)sizeof(*in_buf));
 
     cur_data = in_buf[0];
     next_data = in_buf[1];

@@ -94,6 +94,7 @@ namespace ATENtion.Capture
             KvmLog.Message += Console.WriteLine;
 
             string password = null;
+            ArmingResult armingForLogout = null;
             if (string.IsNullOrEmpty(cli.Jnlp))
             {
                 Console.Write("BMC password: ");
@@ -115,6 +116,7 @@ namespace ATENtion.Capture
                     Console.WriteLine("Loading an existing JNLP session...");
                     arming = BmcArmingClient.ParseJnlp(File.ReadAllText(cli.Jnlp));
                 }
+                armingForLogout = arming;
                 password = null;
 
                 var connection = new KvmConnectionOptions
@@ -131,7 +133,7 @@ namespace ATENtion.Capture
                 };
 
                 if (!string.IsNullOrEmpty(cli.MountIso))
-                    return RunVirtualMediaProbe(connection, cli.MountIso, cli.TimeoutSeconds,
+                    return RunVirtualMediaProbe(connection, arming, cli.MountIso, cli.TimeoutSeconds,
                         cli.VirtualMediaHost, cli.VirtualMediaPort, cli.VirtualMediaPlain);
 
                 Exception fault = null;
@@ -196,6 +198,9 @@ namespace ATENtion.Capture
             finally
             {
                 password = null;
+                // Only once the console is closed: the BMC treats a logout as the end of the console
+                // it armed. A no-op for a JNLP session, which has no web login.
+                BmcArmingClient.Logout(armingForLogout);
             }
         }
 
@@ -235,7 +240,8 @@ namespace ATENtion.Capture
             return result;
         }
 
-        private static int RunVirtualMediaProbe(KvmConnectionOptions connection, string imagePath, int seconds,
+        private static int RunVirtualMediaProbe(KvmConnectionOptions connection, ArmingResult arming,
+                                                string imagePath, int seconds,
                                                 string endpointHost, int endpointPort, bool forcePlain)
         {
             if (!connection.VirtualMediaEnabled)

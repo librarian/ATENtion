@@ -91,8 +91,81 @@
                         IsCheckable="True"
                         Checked="OnToggleSmoothScaling"
                         Unchecked="OnToggleSmoothScaling"/>
+                <Separator/>
+                <!-- How often to ask for a full, non-incremental frame. On ATEN/ASPEED firmware
+                     the BMC only re-encodes the console for a full request; an incremental one is
+                     answered from cache, so this is what actually governs the update rate.
+                     Continuous asks every time, which is the only setting that gives real motion. -->
+                <MenuItem x:Name="FullFrameRequestsItem" Header="Full frame _requests">
+                    <MenuItem x:Name="RefreshContinuousItem"
+                            Header="_Continuous - most responsive, highest bandwidth"
+                            IsCheckable="True" Tag="-1" Click="OnFullRefreshInterval"
+                            ToolTip="Ask for a full frame every time, so the picture is always freshly encoded. Measured on an ASPEED board driving the console with real key presses: the result of a keystroke appeared in about 505ms, against about 1090ms at the 1-second setting, because there the screen only updates when the once-a-second full frame fires. Costs roughly 7 Mbps at 1024x768 against 6 Mbps."/>
+                    <MenuItem x:Name="Refresh1Item" Header="Every _1 second"
+                            IsCheckable="True" Tag="1" Click="OnFullRefreshInterval"/>
+                    <MenuItem x:Name="Refresh2Item" Header="Every _2 seconds"
+                            IsCheckable="True" Tag="2" Click="OnFullRefreshInterval"/>
+                    <MenuItem x:Name="Refresh3Item" Header="Every _3 seconds"
+                            IsCheckable="True" Tag="3" Click="OnFullRefreshInterval"/>
+                    <MenuItem x:Name="Refresh5Item" Header="Every _5 seconds - default, lowest bandwidth"
+                            IsCheckable="True" Tag="5" Click="OnFullRefreshInterval"/>
+                    <MenuItem x:Name="Refresh10Item" Header="Every 1_0 seconds"
+                            IsCheckable="True" Tag="10" Click="OnFullRefreshInterval"/>
+                    <Separator/>
+                    <MenuItem x:Name="RefreshOffItem" Header="O_ff - incremental only"
+                            IsCheckable="True" Tag="0" Click="OnFullRefreshInterval"
+                            ToolTip="Send only incremental requests. Most ATEN/ASPEED firmware answers those from cache, so on such a BMC the screen stops updating until you reconnect or use View &#x2023; Refresh Screen."/>
+                </MenuItem>
+                <MenuItem x:Name="StreamAllTabsItem"
+                        Header="Keep _background tabs streaming"
+                        IsCheckable="True"
+                        Click="OnToggleStreamAllTabs"
+                        ToolTip="Off (default): only the visible tab streams video; hidden tabs check in with the BMC every 10 seconds. On: every connected tab keeps streaming, which is useful for watching one machine boot while working on another - but each tab costs its own bandwidth, up to about 5 Mbps with Full frame requests set to Continuous."/>
+                <!-- The visible tab asks for the next frame as soon as the last arrives, which on a
+                     still screen is mostly replies saying nothing changed. A limit spaces requests
+                     out. The vendor viewer has the same option, off by default. -->
+                <MenuItem Header="Frame rate _limit"
+                        ToolTip="Caps how often the visible tab asks the BMC for a frame. Unlimited is most responsive; a limit lightens the load on the BMC and this computer. Measured on an X10 board, 10 fps took the client's CPU use from 1.4% to 0.9%.">
+                    <MenuItem x:Name="FpsUnlimitedItem" Header="_Unlimited - default"
+                            IsCheckable="True" Tag="0" Click="OnFrameRateLimit"/>
+                    <MenuItem x:Name="Fps60Item" Header="_60 fps"
+                            IsCheckable="True" Tag="60" Click="OnFrameRateLimit"/>
+                    <MenuItem x:Name="Fps30Item" Header="_30 fps"
+                            IsCheckable="True" Tag="30" Click="OnFrameRateLimit"/>
+                    <MenuItem x:Name="Fps10Item" Header="1_0 fps"
+                            IsCheckable="True" Tag="10" Click="OnFrameRateLimit"/>
+                </MenuItem>
+                <!-- The vendor viewer's "Display Preference": chroma/compression mode plus an image
+                     quality level. Both are sent with changeScreenInfo (0x32) and take effect on the
+                     running session. -->
+                <MenuItem Header="_Display preference">
+                    <MenuItem x:Name="Mode444Item"
+                            Header="Enhanced _text (4:4:4) - default"
+                            IsCheckable="True" Tag="444" Click="OnImageMode"
+                            ToolTip="Full chroma. Sharpest text, and on ATEN/ASPEED firmware the only mode that returns freshly encoded frames."/>
+                    <MenuItem x:Name="Mode422Item"
+                            Header="_Normal (4:2:2)"
+                            IsCheckable="True" Tag="422" Click="OnImageMode"
+                            ToolTip="Subsampled chroma. Measured on an ASPEED board this was worse in every way: cached (stale) frames, LARGER frames than 4:4:4, and lower throughput. Offered because other firmware may differ."/>
+                    <Separator/>
+                    <MenuItem x:Name="Quality11Item" Header="Quality: _highest (11) - default"
+                            IsCheckable="True" Tag="11" Click="OnImageQuality"/>
+                    <MenuItem x:Name="Quality9Item" Header="Quality: hi_gh (9)"
+                            IsCheckable="True" Tag="9" Click="OnImageQuality"/>
+                    <MenuItem x:Name="Quality6Item" Header="Quality: _medium (6)"
+                            IsCheckable="True" Tag="6" Click="OnImageQuality"/>
+                    <MenuItem x:Name="Quality3Item" Header="Quality: _low (3)"
+                            IsCheckable="True" Tag="3" Click="OnImageQuality"/>
+                    <MenuItem x:Name="Quality0Item" Header="Quality: l_owest (0)"
+                            IsCheckable="True" Tag="0" Click="OnImageQuality"
+                            ToolTip="Smallest frames. Useful with Full frame requests set to Continuous, where bandwidth is the limit: quality 2 roughly halves the per-frame size against quality 11."/>
+                </MenuItem>
             </MenuItem>
             <MenuItem Header="_Connection">
+                <MenuItem Header="_New Session Tab…"
+                        Click="OnNewSessionTab"
+                        ToolTip="Open another server in a new tab in this window"/>
+                <Separator/>
                 <MenuItem Header="_Connect / Change server…"
                         Click="OnConnectOrChange"/>
                 <MenuItem Header="_Reconnect current"
@@ -103,7 +176,15 @@
                         Header="_Auto-reconnect on drop"
                         IsCheckable="True"
                         IsChecked="True"/>
+                <MenuItem x:Name="ReopenTabsItem"
+                        Header="Re_open tabs on startup"
+                        IsCheckable="True"
+                        IsChecked="True"
+                        ToolTip="Reconnect the saved servers that were open as tabs when ATENtion was closed"/>
                 <Separator/>
+                <MenuItem Header="_User List…"
+                        Click="OnUserList"
+                        ToolTip="Show every console session the BMC currently reports"/>
                 <MenuItem Header="Session _Info…"
                         Click="OnSessionInfo"/>
             </MenuItem>
@@ -125,7 +206,12 @@
                 <MenuItem Header="_Clear Log"
                         Click="OnClearLog"/>
             </MenuItem>
-            <MenuItem Header="_Storage">
+            <MenuItem Header="_Storage" SubmenuOpened="OnStorageMenuOpened">
+                <!-- Filled in when the menu opens, from the BMC's virtual-media slots. -->
+                <MenuItem x:Name="VmediaStateItem"
+                        Header="Virtual media: not connected"
+                        IsEnabled="False"/>
+                <Separator/>
                 <MenuItem x:Name="MountIsoItem"
                         Header="_Mount ISO…"
                         Click="OnMountIso"/>
@@ -173,6 +259,68 @@
                  VerticalScrollBarVisibility="Auto"
                 HorizontalScrollBarVisibility="Auto"
                  TextWrapping="NoWrap"/>
+        <!-- One row per open session. The video surface below is shared: selecting a tab swaps which
+             session's framebuffer is painted into it. Background sessions keep running. Tabs are
+             reordered by dragging; the strip, not the ListBox, handles the pointer for that. -->
+        <Border x:Name="TabStrip"
+                DockPanel.Dock="Top"
+                PreviewMouseLeftButtonDown="OnTabPointerDown"
+                PreviewMouseMove="OnTabPointerMove"
+                PreviewMouseLeftButtonUp="OnTabPointerUp"
+                LostMouseCapture="OnTabLostCapture"
+                MinHeight="30"
+                Background="#252526"
+                BorderBrush="#3A3A3A"
+                BorderThickness="0,0,0,1">
+            <DockPanel>
+                <Button DockPanel.Dock="Right"
+                        Content="+"
+                        Width="24"
+                        Margin="3"
+                        Padding="0"
+                        FontWeight="Bold"
+                        ToolTip="Open another server in a new tab"
+                        Click="OnNewSessionTab"/>
+                <ListBox x:Name="SessionTabs"
+                         Background="Transparent"
+                         BorderThickness="0"
+                         Foreground="#DDD"
+                         SelectionChanged="OnSessionTabChanged"
+                         ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                         ScrollViewer.VerticalScrollBarVisibility="Disabled">
+                    <ListBox.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Orientation="Horizontal"/>
+                        </ItemsPanelTemplate>
+                    </ListBox.ItemsPanel>
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel Orientation="Horizontal" Margin="7,3">
+                                <TextBlock Text="&#x23FB;"
+                                           FontSize="13"
+                                           Margin="0,0,5,0"
+                                           Foreground="{Binding PowerBrush}"
+                                           ToolTip="{Binding PowerTip}"/>
+                                <TextBlock Text="{Binding TabState}"
+                                           Foreground="#7FBF9F"
+                                           Margin="0,0,6,0"/>
+                                <TextBlock Text="{Binding DisplayName}"
+                                           ToolTip="{Binding TabTip}"/>
+                                <Button Content="&#x2715;"
+                                        Margin="9,0,0,0"
+                                        Padding="3,0"
+                                        BorderThickness="0"
+                                        Background="Transparent"
+                                        Foreground="#999"
+                                        Tag="{Binding}"
+                                        ToolTip="Close this session"
+                                        Click="OnCloseSessionTab"/>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </DockPanel>
+        </Border>
         <Border Background="Black"
                 Padding="8"
                 AllowDrop="True"

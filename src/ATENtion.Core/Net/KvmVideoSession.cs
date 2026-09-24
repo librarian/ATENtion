@@ -112,13 +112,18 @@ namespace ATENtion.Core.Net
         /// 0 disables.</summary>
         public int FullRefreshIntervalTicks { get; set; } = 5;
 
-        /// <summary>Optional floor (ms) between incremental frame requests (video FPS cap). The earlier
-        /// 80ms cap was only needed while the keyframe storm saturated the BMC and
-        /// starved input. With the storm gone, incrementals are small and the BMC is request-response
-        /// limited (~its natural rate, like the original's tight loop), so it runs uncapped (0). Raise
-        /// this only if heavy on-screen activity is seen to lag input again.</summary>
+        /// <summary>Shortest time between frame requests, in milliseconds; 0 for no limit.</summary>
+        /// <remarks>
+        /// Uncapped, the request/response loop runs as fast as the round trip allows: about 200
+        /// replies a second on an X10 board even with nothing changing, each one work for the BMC's
+        /// processor and for this client. The vendor viewer has the same cap as an option (off by
+        /// default, 10 fps when on). A request that is due sooner is deferred on a timer, never by
+        /// making the receive pump wait.
+        /// </remarks>
         public int MinFrameIntervalMs { get; set; } = 0;
         private int _lastRequestTick;
+        private Timer _paceTimer;
+        private int _pacePending;   // 0/1: a deferred request is scheduled
 
         /// <summary>How many FramebufferUpdateRequests to keep in flight. ASPEED delta frames must be
         /// requested and applied in strict request/response order: allowing two outstanding requests
@@ -126,6 +131,67 @@ namespace ATENtion.Core.Net
         /// producing duplicated or displaced text blocks. Keep the default at one. Higher values are
         /// retained only as an explicit compatibility/performance experiment.</summary>
         public int PipelineDepth { get; set; } = 1;
+
+        /// <summary>At least two while every frame is full.</summary>
+        /// <remarks>
+        /// Depth one exists to apply delta frames in order against the displayed baseline. A full
+        /// frame is self-contained, so that constraint does not apply and the round trip can overlap.
+        /// </remarks>
+        private int EffectivePipelineDepth =>
+            AlwaysRequestFullFrames ? Math.Max(PipelineDepth, 2) : PipelineDepth;
+
+        /// <summary>
+        /// Request every frame as a full, non-incremental update.
+        /// </summary>
+        /// <remarks>
+        /// ATEN/ASPEED firmware only re-encodes the console for a non-incremental request;
+        /// incremental ones are answered from a cached encode. Full frames are therefore the only
+        /// fresh ones, at roughly 7x the bandwidth.
+        /// </remarks>
+        public bool AlwaysRequestFullFrames { get; set; }
+
+        /// <summary>
+        /// Stop streaming video while keeping the session, its keepalive and any mounted media up.
+        /// </summary>
+        /// <remarks>
+        /// Used for tabs that are not visible. A paused session still asks for one full frame every
+        /// <see cref="PausedCheckSeconds"/>, which keeps <see cref="VideoSignal"/> current and lets
+        /// the watchdog notice a dead link.
+        /// </remarks>
+        public bool VideoPaused
+        {
+            get => _videoPaused;
+            set
+            {
+                if (_videoPaused == value) return;
+                System.Threading.Interlocked.Exchange(ref _pausedTicks, 0);
+                _videoPaused = value;
+                if (!value) ResumeVideo();
+            }
+        }
+        private volatile bool _videoPaused;
+        private int _pausedTicks;
+
+        /// <summary>Seconds between the single full-frame checks a paused session makes. 0 stops them.</summary>
+        /// <remarks>
+        /// A full request is always answered, with a picture or with the no-signal marker, so each
+        /// check refreshes <see cref="VideoSignal"/>. The cost is one full frame per check: about
+        /// 70 KB on ASPEED boards, but about 1.5 MB on Hermon (X9) boards, which send them raw.
+        /// </remarks>
+        public int PausedCheckSeconds { get; set; } = 10;
+
+        // Re-arm after a pause: the watchdog's clock has to be reset before requests resume, or the
+        // silence accumulated while paused counts against it. A full frame repaints the surface,
+        // which is needed anyway since nothing was decoded while hidden.
+        private void ResumeVideo()
+        {
+            if (!_running) return;
+            LastMessageUtc = DateTime.UtcNow;
+            System.Threading.Interlocked.Exchange(ref _probedThisStall, 0);
+            System.Threading.Volatile.Write(ref _outstanding, 0);
+            try { SendUpdate(incremental: false); }
+            catch (Exception ex) { OnSendFault(ex); }
+        }
 
         /// <summary>FBURs sent but not yet answered by a FramebufferUpdate. Held ~= PipelineDepth;
         /// drives the steady-state top-up and the timer's liveness watchdog.</summary>
@@ -152,11 +218,63 @@ namespace ATENtion.Core.Net
         /// Drives the stall watchdog.</summary>
         public DateTime LastMessageUtc { get; private set; }
 
+        /// <summary>Whether the BMC is producing a picture, inferred from the video stream.</summary>
+        /// <remarks>
+        /// The protocol has no power status, so this reads the no-signal marker instead. Present is
+        /// certain; Absent means no picture, which is usually a powered-down host but also matches
+        /// one that is running and not producing video.
+        /// </remarks>
+        public VideoSignalState VideoSignal { get; private set; } = VideoSignalState.Unknown;
+
+        /// <summary>Host power as the BMC reports it, from the reply to a host-status query.</summary>
+        /// <remarks>
+        /// Unlike <see cref="VideoSignal"/>, this tells a host that is off from one that is on with
+        /// no picture. The BMC answers only when asked; see <see cref="RequestHostStatus"/>.
+        /// </remarks>
+        public HostPowerState HostPower { get; private set; } = HostPowerState.Unknown;
+
+        /// <summary>UTC time of the latest host-status reply.</summary>
+        public DateTime HostPowerUtc { get; private set; }
+
+        /// <summary>Asks the BMC for host status (one byte, [0x37]); the reply updates <see cref="HostPower"/>.</summary>
+        public void RequestHostStatus() => Post(HostStatusQuery);
+
+        /// <summary>True once the BMC has answered a host-status query.</summary>
+        /// <remarks>The connect sequence sends one, as the vendor viewer does, so this is known early.</remarks>
+        public bool HostStatusSupported => HostPowerUtc != default(DateTime);
+
+        /// <summary>Seconds between host-status queries while streaming; 0 stops them.</summary>
+        /// <remarks>Hidden tabs use <see cref="PausedCheckSeconds"/> instead.</remarks>
+        public int HostStatusSeconds { get; set; } = 5;
+        private int _statusTicks;
+
+        private static readonly byte[] HostStatusQuery = { 0x37 };
+
+        /// <summary>Why the latest video could not be decoded, or null once a frame decodes.</summary>
+        /// <remarks>Lets the UI say why the screen stays blank instead of waiting indefinitely.</remarks>
+        public string LastDecodeError { get; private set; }
+
+        /// <summary>UTC time <see cref="VideoSignal"/> was last confirmed by a frame or a no-signal marker.</summary>
+        public DateTime VideoSignalUtc { get; private set; }
+
         /// <summary>Input-control state from the server privilege grant (msg 0x39): true = this session
         /// controls input, false = view-only, null = not yet reported. See <see cref="PrivilegeChanged"/>.</summary>
         public bool? Controlling { get; private set; }
         /// <summary>The server's privilege/session string (<c>&lt;sid&gt; ROLE &lt;clientip&gt;</c>).</summary>
         public string PrivilegeInfo { get; private set; }
+
+        /// <summary>
+        /// Every console session the BMC currently reports, as <c>&lt;sid&gt; &lt;user&gt; &lt;client ip&gt;</c>.
+        /// </summary>
+        /// <remarks>
+        /// The BMC answers with one privilege record per active session, indexed downwards, so a burst
+        /// of records beginning at the session count and ending at 1 is one complete list. The list is
+        /// replaced only when a burst completes, so a reader never sees a half-built one.
+        /// </remarks>
+        public System.Collections.Generic.IReadOnlyList<string> Sessions { get; private set; } =
+            new string[0];
+
+        private readonly SessionListBuilder _sessionList = new SessionListBuilder();
 
         public KvmVideoSession(KvmConnectionOptions options, IRfbAuthenticator authenticator = null)
         {
@@ -189,6 +307,7 @@ namespace ATENtion.Core.Net
             if (Decoder == null) throw new InvalidOperationException("Call Open() first.");
             _running = true;
             LastMessageUtc = DateTime.UtcNow; // arm the stall watchdog from connect, not from epoch
+            _paceTimer = new Timer(_ => OnPaceTimer(), null, Timeout.Infinite, Timeout.Infinite);
             _pumpThread = new Thread(PumpLoop) { IsBackground = true, Name = "iKVM-receive" };
             _pumpThread.Start();
             StartInputSender();
@@ -202,6 +321,22 @@ namespace ATENtion.Core.Net
                 try
                 {
                     if (!_running) return;
+                    if (_videoPaused)
+                    {
+                        // A BMC that answers the host-status query is checked with it: four bytes
+                        // back instead of a full frame. Others still get the full frame.
+                        if (PausedCheckDue())
+                        {
+                            if (HostStatusSupported) WriteNow(HostStatusQuery);
+                            else SendUpdate(incremental: false);
+                        }
+                        return;
+                    }
+                    if (HostStatusSeconds > 0 && ++_statusTicks >= HostStatusSeconds)
+                    {
+                        _statusTicks = 0;
+                        WriteNow(HostStatusQuery);
+                    }
                     int t = System.Threading.Interlocked.Increment(ref _ticksSinceFull);
                     if (FullRefreshIntervalTicks > 0 && t >= FullRefreshIntervalTicks)
                         SendUpdate(incremental: false);                       // periodic forced full repairs any delta drift
@@ -228,14 +363,119 @@ namespace ATENtion.Core.Net
             _watchdogTimer = new Timer(_ => { try { WatchdogTick(); } catch (Exception ex) { Diagnostics.KvmLog.Error("watchdog", ex); } }, null, 2000, 2000);
         }
 
+        // One tick of the paused request timer: true when a check is due.
+        private bool PausedCheckDue()
+        {
+            int every = PausedCheckSeconds;
+            if (every <= 0) return false;
+            if (System.Threading.Interlocked.Increment(ref _pausedTicks) < every) return false;
+            System.Threading.Interlocked.Exchange(ref _pausedTicks, 0);
+            return true;
+        }
+
+        /// <summary>What the watchdog should do after a given silence.</summary>
+        internal enum StallAction { None, Probe, Fault }
+
+        /// <summary>The watchdog's decision, kept separate from the timer so it can be tested.</summary>
+        /// <remarks>
+        /// While paused the only traffic expected is the reply to each check, so the fault threshold
+        /// is extended by one check interval and there is no separate probe: the next check is one.
+        /// With checks turned off a paused session expects nothing, and silence proves nothing.
+        /// </remarks>
+        internal static StallAction EvaluateStall(double idleSeconds, bool paused, int pausedCheckSeconds,
+                                                  int probeSeconds, int timeoutSeconds)
+        {
+            if (paused)
+            {
+                if (pausedCheckSeconds <= 0 || timeoutSeconds <= 0) return StallAction.None;
+                return idleSeconds >= pausedCheckSeconds + timeoutSeconds ? StallAction.Fault : StallAction.None;
+            }
+            if (timeoutSeconds > 0 && idleSeconds >= timeoutSeconds) return StallAction.Fault;
+            if (probeSeconds > 0 && idleSeconds >= probeSeconds) return StallAction.Probe;
+            return StallAction.None;
+        }
+
+        // Keeps PipelineDepth requests in flight, no faster than MinFrameIntervalMs allows.
+        private void TopUp()
+        {
+            while (_running && !_videoPaused &&
+                   System.Threading.Volatile.Read(ref _outstanding) < EffectivePipelineDepth)
+            {
+                int wait = MinFrameIntervalMs - unchecked(Environment.TickCount - _lastRequestTick);
+                if (MinFrameIntervalMs > 0 && wait > 0)
+                {
+                    if (System.Threading.Interlocked.Exchange(ref _pacePending, 1) == 0)
+                        _paceTimer?.Change(wait, Timeout.Infinite);
+                    return;
+                }
+                SendUpdate(incremental: true);
+            }
+        }
+
+        private void OnPaceTimer()
+        {
+            System.Threading.Interlocked.Exchange(ref _pacePending, 0);
+            try { TopUp(); }
+            catch (Exception ex) { OnSendFault(ex); }
+        }
+
+        // One FramebufferUpdate arrived: one request is no longer in flight. Never below zero, since
+        // the BMC may send an update nobody asked for.
+        private void ReleaseOneRequest()
+        {
+            int seen;
+            do
+            {
+                seen = System.Threading.Volatile.Read(ref _outstanding);
+                if (seen <= 0) return;
+            }
+            while (System.Threading.Interlocked.CompareExchange(ref _outstanding, seen - 1, seen) != seen);
+        }
+
+        // A privilege record (0x39). The BMC sends one per console session as a burst; each is
+        // processed even when it repeats the previous one, or a user leaving would go unnoticed.
+        private void HandlePrivilege(ServerMessageResult msg)
+        {
+            var type = (PrivilegeRecordType)msg.PrivilegeType;
+            bool changed = Controlling != msg.Controlling;
+            Controlling = msg.Controlling;
+            // Only session records describe a session; the others carry a message in the text field.
+            if (type == PrivilegeRecordType.SessionPresent && PrivilegeInfo != msg.PrivilegeInfo)
+            {
+                PrivilegeInfo = msg.PrivilegeInfo;
+                changed = true;
+            }
+            if (_sessionList.Add(msg.PrivilegeIndex, msg.PrivilegeType, msg.PrivilegeInfo, out var list))
+            {
+                Sessions = list;
+                changed = true;
+            }
+            if (type != PrivilegeRecordType.SessionPresent && type != PrivilegeRecordType.SessionEnded &&
+                type != PrivilegeRecordType.KeyboardLights)
+            {
+                // A notice about this console rather than a session. The vendor viewer closes on a
+                // web logout; this BMC does not enforce it, so it is reported and the session kept,
+                // as this client always has.
+                Diagnostics.KvmLog.Write($"BMC notice: {type} ({msg.PrivilegeInfo})");
+                LastNotice = type;
+                changed = true;
+            }
+            if (changed) PrivilegeChanged?.Invoke(this, EventArgs.Empty);
+        }
+
+        /// <summary>The latest notice the BMC sent about this console, such as a session limit or an upgrade.</summary>
+        /// <remarks>Null until one arrives. Raised through <see cref="PrivilegeChanged"/>.</remarks>
+        public PrivilegeRecordType? LastNotice { get; private set; }
+
         /// <summary>Watchdog body (off the timer thread): probe after a soft stall, fault after a hard one.</summary>
         private void WatchdogTick()
         {
             if (!_running) return;
             double idle = (DateTime.UtcNow - LastMessageUtc).TotalSeconds;
+            var action = EvaluateStall(idle, _videoPaused, PausedCheckSeconds, StallProbeSeconds, StallTimeoutSeconds);
 
             // Hard stall: even a forced-full probe went unanswered -> declare the link dead.
-            if (StallTimeoutSeconds > 0 && idle >= StallTimeoutSeconds)
+            if (action == StallAction.Fault)
             {
                 RaiseFault(new System.IO.IOException(
                     $"No video/response from BMC for {(int)idle}s - connection stalled."));
@@ -245,7 +485,7 @@ namespace ATENtion.Core.Net
             // Soft stall: nudge the BMC with one forced-full FBUR. A live BMC always answers (even
             // on a static screen), which refreshes LastMessageUtc and re-primes a stuck pipeline; a
             // dead one stays silent until the hard-stall fault above. One probe per stall window.
-            if (StallProbeSeconds > 0 && idle >= StallProbeSeconds)
+            if (action == StallAction.Probe)
             {
                 if (System.Threading.Interlocked.Exchange(ref _probedThisStall, 1) == 0)
                 {
@@ -295,10 +535,13 @@ namespace ATENtion.Core.Net
 
         /// <summary>Force a fresh full (non-incremental) frame now - repaints the whole
         /// surface, clearing any stale tiles. Wired to the UI's manual refresh.</summary>
+        /// <remarks>Sent by the input thread, so a caller on the UI thread never blocks on the socket.</remarks>
         public void RequestFullRefresh()
         {
-            try { SendUpdate(incremental: false); } catch (Exception ex) { Diagnostics.KvmLog.Error("manual refresh", ex); }
+            _fullRefreshRequested = true;
+            Wake();
         }
+        private volatile bool _fullRefreshRequested;
 
         /// <summary>Issues one framebuffer-update request and accounts for it in the request
         /// pipeline. The per-cycle message is the FramebufferUpdateRequest alone: runImage
@@ -307,6 +550,9 @@ namespace ATENtion.Core.Net
         /// (FUN_180011950 + FUN_180013060).</summary>
         private void SendUpdate(bool incremental)
         {
+            // The BMC only re-encodes on a non-incremental request; see AlwaysRequestFullFrames.
+            if (AlwaysRequestFullFrames) incremental = false;
+
             // Per-cycle message is JUST the FramebufferUpdateRequest. The original viewer sends
             // runImage ([7,0x0780]) only ONCE at startup, not every cycle (pcap) -
             // sending it per frame was ~hundreds of extra messages and likely extra BMC frames.
@@ -356,14 +602,14 @@ namespace ATENtion.Core.Net
                     _connection.Stream.WriteU8(0x37);
                     _connection.Stream.Flush();
                 }
-                SendScreenInfo(ImageQuality, ImageMode);
+                WriteNow(ScreenInfoRequest.Build(ImageQuality, ImageMode));
                 SendRunImage();                 // runImage [7,0x0780] - once, like the original
                 SendUpdate(incremental: false); // first keyframe (bare FBUR)
                 // Prime the request pipeline: keep PipelineDepth FBURs in flight so the BMC encodes
                 // the next frame while the current one is decoded and presented (overlaps the round trip).
-                for (int i = 1; i < PipelineDepth; i++) SendUpdate(incremental: true);
+                for (int i = 1; i < EffectivePipelineDepth; i++) SendUpdate(incremental: true);
                 // Tell the BMC the configured mouse mode (native sends setMouseMode on connect). Absolute (1) is needed for the absolute pointer coordinates to track.
-                SendMouseMode(MouseMode);
+                WriteNow(new byte[] { 0x36, 0x00, MouseMode });
                 // NOTE: do NOT auto-send hotPlug (0x3a). It appears to be a toggle/replug pulse with
                 // no parameter; the virtual USB keyboard/mouse is normally already attached, so an
                 // auto-send can TOGGLE it OFF. It's exposed as a manual menu action instead.
@@ -378,33 +624,47 @@ namespace ATENtion.Core.Net
                     if (++count <= 20) // log the first messages to characterise the stream
                         Diagnostics.KvmLog.Write($"msg #{count}: type 0x{msg.Type:x2}{(msg.IsFrame ? " (frame)" : "")}");
                     VideoBytes += msg.PayloadBytes;
-                    if (msg.HasPrivilege && (Controlling != msg.Controlling || PrivilegeInfo != msg.PrivilegeInfo))
+                    // Every FramebufferUpdate answers a request, including the no-signal marker and
+                    // an empty update. Counting only decoded pictures left the no-signal replies of
+                    // a powered-down host counted as outstanding, which stalled the stream once it
+                    // came back on.
+                    if (msg.Type == RfbMessageType.FramebufferUpdate) ReleaseOneRequest();
+                    if (msg.HasPrivilege) HandlePrivilege(msg);
+                    if (msg.HasHostStatus)
                     {
-                        Controlling = msg.Controlling;
-                        PrivilegeInfo = msg.PrivilegeInfo;
-                        PrivilegeChanged?.Invoke(this, EventArgs.Empty);
+                        HostPower = msg.HostPowered ? HostPowerState.On : HostPowerState.Off;
+                        HostPowerUtc = DateTime.UtcNow;
+                    }
+                    if (msg.IsFrame) LastDecodeError = null;
+                    else if (msg.DecodeError != null) LastDecodeError = msg.DecodeError;
+                    if (msg.NoVideoSignal)
+                    {
+                        VideoSignal = VideoSignalState.Absent;
+                        VideoSignalUtc = DateTime.UtcNow;
                     }
                     if (msg.IsFrame)
                     {
+                        VideoSignal = VideoSignalState.Present;
+                        VideoSignalUtc = DateTime.UtcNow;
                         FramesDecoded++;
                         LastFrameUtc = DateTime.UtcNow;
-                        System.Threading.Interlocked.Decrement(ref _outstanding); // this frame answered one request
                         FrameDecoded?.Invoke(this, new FrameDecodedEventArgs(Decoder.Frame, msg.Dirty));
                         if (msg.Resized)
                         {
                             // Resolution changed -> one full keyframe to repaint the new-size surface.
-                            // This also restores pipeline depth (−1 consumed above, +1 here).
+                            // This also restores pipeline depth (-1 released above, +1 here).
                             SendUpdate(incremental: false);
                         }
                         else
                         {
-                            // Top the pipeline back up to PipelineDepth. Steady state is exactly one
+                            // Top the pipeline back up to PipelineDepth. Only after a picture: topping up
+                            // after a no-signal reply would loop request and reply as fast as the link
+                            // allows while the host is off. Steady state is exactly one
                             // request per frame consumed (consume 1 -> send 1), so depth is bounded at
                             // PipelineDepth and cannot storm. The pump never blocks on the UI (the
                             // present is async), so it keeps draining the socket and the BMC keeps
                             // servicing input.
-                            while (_running && System.Threading.Volatile.Read(ref _outstanding) < PipelineDepth)
-                                SendUpdate(incremental: true);
+                            TopUp();
                         }
                     }
                 }
@@ -526,6 +786,13 @@ namespace ATENtion.Core.Net
                 byte[] move = null; // then the single latest coalesced move, if any
                 lock (_inputLock) { if (_movePending) { move = _moveFrame; _movePending = false; } }
                 if (move != null) WriteFrame(move);
+
+                if (_fullRefreshRequested)
+                {
+                    _fullRefreshRequested = false;
+                    try { SendUpdate(incremental: false); }
+                    catch (Exception ex) { if (_senderRunning) Diagnostics.KvmLog.Error("manual refresh", ex); }
+                }
             }
         }
 
@@ -556,7 +823,7 @@ namespace ATENtion.Core.Net
             else
             {
                 lock (_inputLock) { _discrete.Enqueue(new InputItem(frame, false, 0)); _movePending = false; }
-                _inputSignal.Set();
+                Wake();
             }
             if (LogInput)
             {
@@ -597,15 +864,16 @@ namespace ATENtion.Core.Net
                     _discrete.Enqueue(new InputItem(frame, coalescible, coalescible ? stampMs : 0));
             }
             if (dropped) { NoteDroppedRepeat(); return; }
-            _inputSignal.Set();
-            if (LogInput)
-                Diagnostics.KvmLog.Write($"TX key keysym=0x{keysym:x4} {(down ? "down" : "up")}{(autoRepeat ? " (repeat)" : "")} : " +
-                                         Diagnostics.KvmLog.Hex(frame));
+            Wake();
+            // Which key is deliberately not logged: it would put whatever is typed on the host,
+            // passwords included, into the log file.
+            if (LogInput && !autoRepeat)
+                Diagnostics.KvmLog.Write($"TX key {(down ? "down" : "up")}");
         }
 
         /// <summary>Release every key currently held down (send an up for each) and clear the held set.
-        /// Call when the viewer loses focus so a modifier (or any key) can't stick on the host if the
-        /// user Alt-Tabs or clicks away mid-hold. Releases are non-coalescible, so they are never shed.
+        /// Call when the viewer loses focus or the user switches tabs, so a key held at that moment
+        /// cannot stay down on the host. Releases are non-coalescible, so they are never shed.
         /// Mirrors the original viewer's <c>releasePressedKeys()</c>. No-op if nothing held.</summary>
         public void ReleaseHeldKeys()
         {
@@ -618,8 +886,8 @@ namespace ATENtion.Core.Net
                     _discrete.Enqueue(new InputItem(_keyboard.BuildKeyEvent(keysym, false), false, 0));
                 _heldKeys.Clear();
             }
-            _inputSignal.Set();
-            if (LogInput) Diagnostics.KvmLog.Write($"input: released {n} held key(s) on focus loss.");
+            Wake();
+            if (LogInput) Diagnostics.KvmLog.Write($"input: released {n} held key(s).");
         }
 
         /// <summary>Tally a shed auto-repeat and emit at most ~1 diagnostic line/sec (logging on).</summary>
@@ -641,11 +909,7 @@ namespace ATENtion.Core.Net
         public void SendMouseMode(byte mode = 1)
         {
             byte[] frame = { 0x36, 0x00, mode };
-            lock (_sendLock)
-            {
-                _connection.Stream.WriteBytes(frame);
-                _connection.Stream.Flush();
-            }
+            Post(frame);
             Diagnostics.KvmLog.Write($"TX mousemode {mode} : " + Diagnostics.KvmLog.Hex(frame));
         }
 
@@ -654,11 +918,7 @@ namespace ATENtion.Core.Net
         public void SendScreenInfo(byte quality, ushort mode)
         {
             byte[] frame = ScreenInfoRequest.Build(quality, mode);
-            lock (_sendLock)
-            {
-                _connection.Stream.WriteBytes(frame);
-                _connection.Stream.Flush();
-            }
+            Post(frame);
             Diagnostics.KvmLog.Write($"TX screeninfo quality={quality} mode={mode} : " +
                 Diagnostics.KvmLog.Hex(frame));
         }
@@ -668,12 +928,39 @@ namespace ATENtion.Core.Net
         /// BMC's virtual HID, injected keystrokes/mouse go nowhere until this is sent.</summary>
         public void SendHotPlug()
         {
+            Post(new byte[] { 0x3a });
+            Diagnostics.KvmLog.Write("TX hotplug : 3a");
+        }
+
+        // Control frames from the UI go out on the input thread, in order with keys and clicks, so
+        // the caller never waits on the socket. Before the pump starts they are written directly.
+        private void Post(byte[] frame)
+        {
+            if (!_senderRunning)
+            {
+                // Before the pump starts, or after the session stopped; the latter has no socket left.
+                try { WriteNow(frame); }
+                catch (Exception ex) { Diagnostics.KvmLog.Error("control send", ex); }
+                return;
+            }
+            lock (_inputLock) { _discrete.Enqueue(new InputItem(frame, false, 0)); }
+            Wake();
+        }
+
+        // Wakes the input thread. A call that races a teardown finds the handle already released;
+        // there is nothing left to wake then.
+        private void Wake()
+        {
+            try { _inputSignal.Set(); } catch (ObjectDisposedException) { }
+        }
+
+        private void WriteNow(byte[] frame)
+        {
             lock (_sendLock)
             {
-                _connection.Stream.WriteU8(0x3a);
+                _connection.Stream.WriteBytes(frame);
                 _connection.Stream.Flush();
             }
-            Diagnostics.KvmLog.Write("TX hotplug : 3a");
         }
 
         /// <summary>Send a chassis power command (OEM record <c>[0x1a][code]</c>).</summary>
@@ -681,7 +968,7 @@ namespace ATENtion.Core.Net
         {
             byte[] frame = PowerControl.Build(command);
             lock (_inputLock) { _discrete.Enqueue(new InputItem(frame, false, 0)); }
-            _inputSignal.Set();
+            Wake();
             if (LogInput)
                 Diagnostics.KvmLog.Write($"TX power {command} : " + Diagnostics.KvmLog.Hex(frame));
         }
@@ -697,6 +984,8 @@ namespace ATENtion.Core.Net
             _keepAliveTimer = null;
             try { _watchdogTimer?.Dispose(); } catch { }
             _watchdogTimer = null;
+            try { _paceTimer?.Dispose(); } catch { }
+            _paceTimer = null;
         }
 
         public void Dispose()
@@ -708,9 +997,19 @@ namespace ATENtion.Core.Net
             // reconnect cycles from leaking threads/handles. _running is already false, so the pump's
             // read-throws-on-close lands in its catch as an expected teardown (no spurious Faulted).
             try { _connection?.Dispose(); } catch { }
-            try { _pumpThread?.Join(2000); } catch { }
-            try { _senderThread?.Join(1000); } catch { }
-            try { _inputSignal.Dispose(); } catch { }
+            bool pumpExited = JoinQuietly(_pumpThread, 2000);
+            bool senderExited = JoinQuietly(_senderThread, 1000);
+            // A worker that has not stopped may still touch these, so leak them rather than free
+            // them underneath it. Freeing the native decoder context would be a use-after-free.
+            if (senderExited) try { _inputSignal.Dispose(); } catch { }
+            if (pumpExited) try { Decoder?.Dispose(); } catch { }   // frees the native ASPEED context
+            else Diagnostics.KvmLog.Write("Receive pump did not stop within 2s; leaving the decoder allocated.");
+        }
+
+        private static bool JoinQuietly(Thread thread, int timeoutMs)
+        {
+            if (thread == null || thread == Thread.CurrentThread) return thread == null;
+            try { return thread.Join(timeoutMs); } catch { return false; }
         }
     }
 }

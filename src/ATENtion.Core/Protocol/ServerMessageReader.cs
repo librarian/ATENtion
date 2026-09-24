@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using ATENtion.Core.Net;
 using ATENtion.Core.Video;
@@ -28,6 +29,8 @@ namespace ATENtion.Core.Protocol
         public byte Type;
         /// <summary>Count of video payload bytes received for this message, for the bandwidth readout.</summary>
         public int PayloadBytes;
+        /// <summary>True when the update carried only the BMC's no-video-signal marker.</summary>
+        public bool NoVideoSignal;
         /// <summary>
         /// True when this message resized the decode surface (a resolution change). The pump
         /// responds by requesting one full keyframe so the new-size surface is repainted.
@@ -46,6 +49,17 @@ namespace ATENtion.Core.Protocol
         /// string, of the form <c>&lt;sid&gt; ROLE &lt;clientip&gt;</c>.
         /// </summary>
         public string PrivilegeInfo;
+        /// <summary>The privilege record's index. The BMC sends one record per active session,
+        /// counting down, so the first of a burst carries the session count and the last is 1.</summary>
+        public uint PrivilegeIndex;
+        /// <summary>The kind of privilege record; see <see cref="Net.PrivilegeRecordType"/>.</summary>
+        public uint PrivilegeType;
+        /// <summary>True for a host-status reply (0x37).</summary>
+        public bool HasHostStatus;
+        /// <summary>Whether the host is powered on, from a host-status reply.</summary>
+        public bool HostPowered;
+        /// <summary>Why a rectangle in this update could not be decoded, or null.</summary>
+        public string DecodeError;
     }
 
     /// <summary>
@@ -116,7 +130,6 @@ namespace ATENtion.Core.Protocol
         public static ServerMessageResult ConsumeOne(BufferedRfbStream s, AtenTileDecoder decoder)
         {
             byte type = s.ReadU8();
-            ATENtion.Core.Diagnostics.KvmLog.Write($"recv: message-type byte 0x{type:x2}");
             var result = new ServerMessageResult { Type = type };
 
             switch (type)
@@ -127,6 +140,7 @@ namespace ATENtion.Core.Protocol
                     foreach (var rect in fbu.Rects)
                     {
                         result.PayloadBytes += rect.Payload.Length;
+                        if (rect.IsNoSignal) result.NoVideoSignal = true;
                         if (rect.Payload.Length == 0) continue;
                         // A rectangle anchored at the top-left corner carries the current resolution,
                         // on both keyframes and incrementals (an incremental rect reports the live
@@ -157,6 +171,17 @@ namespace ATENtion.Core.Protocol
                             // enabled, retain the first complete packet for offline codec analysis.
                             ATENtion.Core.Diagnostics.KvmLog.TryCaptureUnsupportedFrame(rect.Payload);
                             ATENtion.Core.Diagnostics.KvmLog.Write("  decode skipped: " + ex.Message);
+                            result.DecodeError = ex.Message;
+                        }
+                        catch (Exception ex) when (!(ex is OutOfMemoryException))
+                        {
+                            // A malformed rectangle, or a decoder that cannot load. The bytes are
+                            // consumed either way, so skipping keeps the stream aligned; ending the
+                            // session would only reconnect into the same failure.
+                            ATENtion.Core.Diagnostics.KvmLog.Write($"  decode failed: {ex.GetType().Name}: {ex.Message}");
+                            result.DecodeError = ex is DllNotFoundException || ex is BadImageFormatException
+                                ? "the video decoder library could not be loaded (" + ex.Message + ")"
+                                : ex.Message;
                         }
                     }
                     result.Dirty = dirty;
@@ -177,7 +202,15 @@ namespace ATENtion.Core.Protocol
 
                 case RfbMessageType.Server0x16: s.Skip(1); break;          // FUN_180009830
                 case RfbMessageType.Keyboard0x35: s.Skip(5); break;        // keyboard(2) + mouse(3) fields
-                case RfbMessageType.Screen0x37: s.Skip(3); break;          // mouse status
+                case RfbMessageType.Screen0x37:                            // host status, the reply to [0x37]
+                    {
+                        // Three bytes. The third is host power: 1 on a running host and 0 on each of
+                        // three powered-off X10 boards tested, whatever the video was doing.
+                        byte[] status = s.ReadExact(3);
+                        result.HasHostStatus = true;
+                        result.HostPowered = status[2] != 0;
+                        break;
+                    }
                 case RfbMessageType.Privilege0x39: // privilege/control grant (native FUN_180011d80)
                     {
                         // Two u32 words followed by a 256-byte "<sid> ROLE <clientip>" string. The native
@@ -194,6 +227,8 @@ namespace ATENtion.Core.Protocol
                         result.HasPrivilege = true;
                         result.Controlling = !(a == 1 && b == 4);
                         result.PrivilegeInfo = text.Trim();
+                        result.PrivilegeIndex = a;
+                        result.PrivilegeType = b;
                         ATENtion.Core.Diagnostics.KvmLog.Write(
                             $"  privilege 0x39: a={a} b={b} controlling={result.Controlling} info=\"{result.PrivilegeInfo}\"");
                         break;

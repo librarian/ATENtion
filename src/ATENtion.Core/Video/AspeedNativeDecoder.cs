@@ -24,6 +24,46 @@ namespace ATENtion.Core.Video
             IntPtr input, int inputLength, IntPtr output, int width, int height,
             uint mode420, uint selector, uint advanceSelector);
 
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "aspeed_decode_ctx")]
+        private static extern void NativeDecodeCtx(
+            IntPtr context, IntPtr input, int inputLength, IntPtr output, int width, int height,
+            uint mode420, uint selector, uint advanceSelector);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "aspeed_decode_ctx_map")]
+        private static extern void NativeDecodeCtxMap(
+            IntPtr context, IntPtr input, int inputLength, IntPtr output, int width, int height,
+            uint mode420, uint selector, uint advanceSelector, IntPtr blockMap, int blockMapLength);
+
+        // Set once a library without the block-map entry point has been seen, so later frames go
+        // straight to the untracked decode.
+        private static bool _blockMapUnsupported;
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "aspeed_ctx_new")]
+        private static extern IntPtr NativeContextNew();
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "aspeed_ctx_free")]
+        private static extern void NativeContextFree(IntPtr context);
+
+        /// <summary>
+        /// Allocates a decoder context so this session's 2-pass buffer and quantisation tables are
+        /// its own; sessions sharing them decode each other's state.
+        /// </summary>
+        /// <returns>The context, or <see cref="IntPtr.Zero"/> to fall back to the shared state.</returns>
+        internal static IntPtr CreateContext()
+        {
+            lock (Sync)
+            {
+                EnsureInitialized();
+                return NativeContextNew();
+            }
+        }
+
+        internal static void DestroyContext(IntPtr context)
+        {
+            if (context == IntPtr.Zero) return;
+            lock (Sync) NativeContextFree(context);
+        }
+
         internal static void VerifyAvailable()
         {
             lock (Sync)
@@ -32,7 +72,19 @@ namespace ATENtion.Core.Video
             }
         }
 
-        internal static void Decode(byte[] packet, FrameBuffer frame)
+        internal static void Decode(byte[] packet, FrameBuffer frame, IntPtr context)
+        {
+            byte[] unused = null;
+            Decode(packet, frame, context, ref unused, out _);
+        }
+
+        /// <summary>Decodes one packet and reports which blocks it wrote.</summary>
+        /// <param name="blockMap">
+        /// Grown as needed and cleared, then set to 1 for each block the packet wrote, row-major.
+        /// </param>
+        /// <param name="blockSize">The block edge in pixels: 16 for 4:2:0, 8 for 4:4:4.</param>
+        /// <returns>False when the loaded library cannot report blocks; the whole frame may have changed.</returns>
+        internal static bool Decode(byte[] packet, FrameBuffer frame, IntPtr context, ref byte[] blockMap, out int blockSize)
         {
             if (packet == null) throw new ArgumentNullException(nameof(packet));
             if (frame == null) throw new ArgumentNullException(nameof(frame));
@@ -42,6 +94,15 @@ namespace ATENtion.Core.Video
                     default(VideoPacketHeader));
 
             AspeedPacketHeader header = AspeedPacketHeader.Parse(packet);
+            blockSize = header.Mode420 != 0 ? 16 : 8;
+            int blocks = ((frame.Width + blockSize - 1) / blockSize) * ((frame.Height + blockSize - 1) / blockSize);
+            bool track = context != IntPtr.Zero && !_blockMapUnsupported;
+            if (track)
+            {
+                if (blockMap == null || blockMap.Length < blocks) blockMap = new byte[blocks];
+                Array.Clear(blockMap, 0, blocks);
+            }
+            GCHandle mapHandle = default(GCHandle);
             GCHandle inputHandle = default(GCHandle);
             GCHandle outputHandle = default(GCHandle);
 
@@ -53,22 +114,39 @@ namespace ATENtion.Core.Video
 
                     inputHandle = GCHandle.Alloc(packet, GCHandleType.Pinned);
                     outputHandle = GCHandle.Alloc(frame.Pixels, GCHandleType.Pinned);
-                    NativeDecode(
-                        IntPtr.Add(inputHandle.AddrOfPinnedObject(), AspeedPacketHeader.Size),
-                        packet.Length - AspeedPacketHeader.Size,
-                        outputHandle.AddrOfPinnedObject(),
-                        frame.Width,
-                        frame.Height,
-                        (uint)header.Mode420,
-                        header.Selector,
-                        header.AdvanceSelector);
+                    IntPtr input = IntPtr.Add(inputHandle.AddrOfPinnedObject(), AspeedPacketHeader.Size);
+                    int length = packet.Length - AspeedPacketHeader.Size;
+                    IntPtr output = outputHandle.AddrOfPinnedObject();
+                    if (track)
+                    {
+                        mapHandle = GCHandle.Alloc(blockMap, GCHandleType.Pinned);
+                        try
+                        {
+                            NativeDecodeCtxMap(context, input, length, output, frame.Width, frame.Height,
+                                               (uint)header.Mode420, header.Selector, header.AdvanceSelector,
+                                               mapHandle.AddrOfPinnedObject(), blocks);
+                            return true;
+                        }
+                        catch (EntryPointNotFoundException)
+                        {
+                            _blockMapUnsupported = true;   // an older library: decode without tracking
+                        }
+                    }
+                    if (context != IntPtr.Zero)
+                        NativeDecodeCtx(context, input, length, output, frame.Width, frame.Height,
+                                        (uint)header.Mode420, header.Selector, header.AdvanceSelector);
+                    else
+                        NativeDecode(input, length, output, frame.Width, frame.Height,
+                                     (uint)header.Mode420, header.Selector, header.AdvanceSelector);
                 }
                 finally
                 {
+                    if (mapHandle.IsAllocated) mapHandle.Free();
                     if (outputHandle.IsAllocated) outputHandle.Free();
                     if (inputHandle.IsAllocated) inputHandle.Free();
                 }
             }
+            return false;
         }
 
         private static void EnsureInitialized()
