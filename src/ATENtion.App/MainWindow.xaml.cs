@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -155,32 +156,70 @@ namespace ATENtion.App
 
         private void OnSessionTabChanged(object sender, SelectionChangedEventArgs e)
         {
-            var ctx = SessionTabs.SelectedItem as SessionContext;
-            if (ctx == null || ReferenceEquals(ctx, _ctx)) return;
-            var leaving = _ctx;
-            _ctx = ctx;
-            // A hidden tab stops requesting video by default - the frames would be decoded, copied
-            // and discarded - unless the user wants every tab live.
-            if (leaving?.Session != null && !StreamAllTabsItem.IsChecked)
-                leaving.Session.VideoPaused = true;
-            if (ctx.Session != null) ctx.Session.VideoPaused = false;   // resume + repaint
-            ActivateContext();
+            if (SessionTabs.SelectedItem is SessionContext ctx) SwitchTo(ctx);
         }
 
-        private volatile bool _streamAllTabs;
+        /// <summary>Makes a tab the visible one. Every route to a different tab comes through here.</summary>
+        /// <remarks>
+        /// Input still held on the tab being left is released there: its key-up and button-up
+        /// events will now go to the new tab's host, and the old host would otherwise keep the key
+        /// down. Streaming is then brought into line for every tab.
+        /// </remarks>
+        private void SwitchTo(SessionContext next)
+        {
+            if (next == null || ReferenceEquals(next, _ctx)) return;
+            var leaving = _ctx;
+            if (leaving != null) ReleaseHeldInput(leaving);
+            _ctx = next;
+            if (!ReferenceEquals(SessionTabs.SelectedItem, next)) SessionTabs.SelectedItem = next;
+            ApplyTabStreaming();
+            ActivateContext();
+        }
 
         private void OnToggleStreamAllTabs(object sender, RoutedEventArgs e) => ApplyTabStreaming();
 
         // Bring every session into line with the toggle: all streaming, or only the visible one.
         private void ApplyTabStreaming()
         {
-            bool all = StreamAllTabsItem.IsChecked;
-            _streamAllTabs = all;
             foreach (var c in _sessions)
-            {
-                if (c.Session == null) continue;
-                c.Session.VideoPaused = !all && !ReferenceEquals(c, _ctx);
-            }
+                if (c.Session != null) ApplyStreaming(c, c.Session);
+        }
+
+        /// <summary>Sets whether a session streams or only checks in, from the UI thread.</summary>
+        private void ApplyStreaming(SessionContext ctx, KvmVideoSession session)
+        {
+            session.PausedCheckSeconds = _pausedCheckSeconds;
+            session.VideoPaused = !StreamAllTabsItem.IsChecked && !ReferenceEquals(ctx, _ctx);
+        }
+
+        // ---- hidden-tab checks ----
+
+        /// <summary>Seconds between the checks a hidden tab makes on its host. 0 turns them off.</summary>
+        private int _pausedCheckSeconds = 10;
+
+        private IEnumerable<KeyValuePair<int, MenuItem>> PausedCheckItems()
+        {
+            yield return new KeyValuePair<int, MenuItem>(5, Check5Item);
+            yield return new KeyValuePair<int, MenuItem>(10, Check10Item);
+            yield return new KeyValuePair<int, MenuItem>(30, Check30Item);
+            yield return new KeyValuePair<int, MenuItem>(0, CheckOffItem);
+        }
+
+        private void OnPausedCheckInterval(object sender, RoutedEventArgs e)
+        {
+            if (!(sender is MenuItem item) || !int.TryParse(item.Tag as string, out int seconds)) return;
+            _pausedCheckSeconds = seconds;
+            SyncPausedCheckMenu();
+            ApplyTabStreaming();
+            FlashStatus(seconds > 0
+                ? $"Hidden tabs: checked every {seconds}s."
+                : "Hidden tabs: not checked - their power glyph goes stale.");
+        }
+
+        private void SyncPausedCheckMenu()
+        {
+            foreach (var entry in PausedCheckItems())
+                entry.Value.IsChecked = entry.Key == _pausedCheckSeconds;
         }
 
         /// <summary>Replays the newly selected session's state into the window's shared controls.</summary>
@@ -299,35 +338,32 @@ namespace ATENtion.App
 
         private void CloseContext(SessionContext ctx)
         {
-            ctx.ReconnectTimer.Stop();
-            ctx.ReconnectTimer.Tick -= OnReconnectTick;
-            ClearVmedia(ctx);
-            TearDownSession(ctx);
-
-            // Always keep one tab: closing the last session leaves an empty one to connect from.
-            if (_sessions.Count == 1)
-            {
-                var fresh = RegisterContext(new SessionContext
-                {
-                    FullFrameInterval = ctx.FullFrameInterval,
-                    ImageMode = ctx.ImageMode,
-                    ImageQuality = ctx.ImageQuality,
-                });
-                _sessions.Remove(ctx);
-                _ctx = fresh;
-                SessionTabs.SelectedItem = fresh;
-                ActivateContext();
-                return;
-            }
-
-            int index = _sessions.IndexOf(ctx);
-            _sessions.Remove(ctx);
             if (ReferenceEquals(_ctx, ctx))
             {
-                _ctx = _sessions[Math.Min(index, _sessions.Count - 1)];
-                SessionTabs.SelectedItem = _ctx;
-                ActivateContext();
+                // Move off the tab first, through the normal path, so the replacement resumes
+                // streaming and the closing tab's held input is released before it goes.
+                SessionContext next;
+                if (_sessions.Count == 1)
+                {
+                    // Always keep one tab: closing the last session leaves an empty one to connect from.
+                    next = RegisterContext(new SessionContext
+                    {
+                        FullFrameInterval = ctx.FullFrameInterval,
+                        ImageMode = ctx.ImageMode,
+                        ImageQuality = ctx.ImageQuality,
+                    });
+                }
+                else
+                {
+                    int index = _sessions.IndexOf(ctx);
+                    next = _sessions[TabReorder.NeighbourAfterClose(index, _sessions.Count)];
+                }
+                SwitchTo(next);
             }
+
+            ctx.ReconnectTimer.Tick -= OnReconnectTick;
+            ctx.Dispose();
+            _sessions.Remove(ctx);
         }
 
         private void RestoreUi()
@@ -365,6 +401,9 @@ namespace ATENtion.App
                 ? ScreenInfoRequest.MaximumQuality : (byte)s.ImageQuality;
             ApplyDisplayPreference();
             StreamAllTabsItem.IsChecked = s.StreamAllTabs;
+            _pausedCheckSeconds = PausedCheckItems().Any(i => i.Key == s.HiddenTabCheckSeconds)
+                ? s.HiddenTabCheckSeconds : 10;
+            SyncPausedCheckMenu();
             ApplyTabStreaming();
             OnToggleLog(null, null);
             OnFitModeChanged(null, null);
@@ -386,12 +425,7 @@ namespace ATENtion.App
             _flashTimer.Stop();
             SaveUi();
             // Tear down every tab, not just the visible one.
-            foreach (var ctx in _sessions)
-            {
-                ctx.ReconnectTimer.Stop();
-                try { ctx.Session?.Dispose(); } catch { }
-                try { ctx.Vmedia?.Dispose(); } catch { }
-            }
+            foreach (var ctx in _sessions) ctx.Dispose();
         }
 
         private void SaveUi()
@@ -409,6 +443,7 @@ namespace ATENtion.App
                 ImageMode = _imageMode,
                 ImageQuality = _imageQuality,
                 StreamAllTabs = StreamAllTabsItem.IsChecked,
+                HiddenTabCheckSeconds = _pausedCheckSeconds,
                 ReopenTabs = ReopenTabsItem.IsChecked,
                 OpenProfileIds = _sessions
                     .Select(c => c.ConnectProfile?.Id)
@@ -539,12 +574,20 @@ namespace ATENtion.App
             }
         }
 
-        // Read straight off the video stream (KvmVideoSession.VideoSignal): nothing to poll, and no
-        // dependency on Redfish or IPMI being available.
+        // Read straight off the video stream (KvmVideoSession.VideoSignal): no dependency on Redfish
+        // or IPMI being available. A hidden tab keeps it current with its periodic check.
         private void RefreshPowerStates()
         {
             foreach (var ctx in _sessions)
-                ctx.Power = ctx.Session?.VideoSignal ?? Core.Net.VideoSignalState.Unknown;
+            {
+                var s = ctx.Session;
+                var state = PowerStatus.Displayed(s != null, ctx.LiveConnected,
+                    s?.VideoSignal ?? Core.Net.VideoSignalState.Unknown);
+                TimeSpan? age = null;
+                if (s != null && s.VideoPaused && s.VideoSignalUtc != default(DateTime))
+                    age = DateTime.UtcNow - s.VideoSignalUtc;
+                ctx.UpdatePower(state, age);
+            }
         }
 
         private void SetupLogging()
@@ -599,6 +642,7 @@ namespace ATENtion.App
         // session is what detaches them; there is nothing to unsubscribe by name.
         private void TearDownSession(SessionContext ctx)
         {
+            ctx.Attempts.Cancel();   // a connect still in flight would otherwise attach itself later
             if (ctx.Session != null)
             {
                 try { ctx.Session.Dispose(); } catch { }
@@ -619,16 +663,16 @@ namespace ATENtion.App
         /// <summary>The server reported the input-control state (message 0x39): show whether this
         /// session is driving the host or only watching, so the user knows whether their keyboard and
         /// mouse will reach the machine.</summary>
-        private void OnPrivilegeChanged(SessionContext ctx)
+        private void OnPrivilegeChanged(SessionContext ctx, KvmVideoSession s)
         {
-            var s = ctx.Session;
-            if (s == null) return;
-            Dispatcher.Invoke(() =>
+            // BeginInvoke: this runs on the pump, which a teardown on the UI thread may be joining.
+            Dispatcher.BeginInvoke(new Action(() =>
             {
+                if (!ReferenceEquals(ctx.Session, s)) return;   // a session since replaced or closed
                 if (s.Controlling == true) SetStatus(ctx, "● Controlling", StateGreen);
                 else SetStatus(ctx, "● View-only", StateOrange);
                 if (ReferenceEquals(ctx, _ctx)) UpdateTitle();
-            });
+            }));
         }
 
         private void OnAbout(object sender, RoutedEventArgs e) =>
@@ -706,7 +750,7 @@ namespace ATENtion.App
         /// <summary>Explicit user disconnect: tear down and STAY down (cancels any pending auto-reconnect).</summary>
         private void OnDisconnect(object sender, RoutedEventArgs e)
         {
-            if (_session == null && !_liveConnected && !_reconnectTimer.IsEnabled)
+            if (_session == null && !_liveConnected && !_reconnectTimer.IsEnabled && !_ctx.Attempts.IsRunning)
             {
                 FlashStatus("Not connected."); return;
             }
@@ -739,7 +783,7 @@ namespace ATENtion.App
 
         private void ScheduleReconnect(SessionContext ctx, string why)
         {
-            if (ctx.UserDisconnected) return; // user asked to stay disconnected - ignore the teardown fault
+            if (ctx.IsClosed || ctx.UserDisconnected) return; // closed, or asked to stay disconnected
             if (ReferenceEquals(ctx, _ctx)) UpdateTitle();
             if (!AutoReconnectItem.IsChecked || ctx.ConnectOptions == null)
             {
@@ -769,7 +813,7 @@ namespace ATENtion.App
             var ctx = timer?.Tag as SessionContext;
             if (ctx == null) return;
             ctx.ReconnectTimer.Stop();
-            if (ctx.ConnectOptions == null) return;
+            if (ctx.IsClosed || ctx.ConnectOptions == null) return;
             TearDownSession(ctx);
             ctx.LiveConnected = false;
             SetStatus(ctx, "● Reconnecting...", StateNeutral);
@@ -791,10 +835,15 @@ namespace ATENtion.App
                 $"tls={options.UseTls} armViaWeb={armViaWeb} credentialLengths=" +
                 $"{(options.KvmUsername ?? "").Length}/{(options.KvmPassword ?? "").Length}");
             bool isAutomaticRetry = ctx.ReconnectAttempts > 0;
+            // Supersedes any attempt still running for this tab. Every step that would touch the tab
+            // checks the token first, so a late attempt cannot attach a session the tab no longer wants.
+            var token = ctx.Attempts.Begin();
 
             Task.Run(() =>
             {
                 bool armingCompleted = !armViaWeb;
+                KvmVideoSession session = null;
+                CancellationTokenRegistration abort = default(CancellationTokenRegistration);
                 try
                 {
                     if (armViaWeb)
@@ -817,15 +866,15 @@ namespace ATENtion.App
                             $"vmedia server port {options.VirtualMediaPort}, enabled={options.VirtualMediaEnabled}.");
                     }
 
-                    var session = new KvmVideoSession(options)
+                    if (token.IsCancellationRequested) return;
+
+                    session = new KvmVideoSession(options)
                     {
                         MouseMode = (byte)_mouseMode, // enum value == on-wire mode byte
                         // From ctx, not the forwarding properties: this runs on a background task
                         // and may be a tab that is not the visible one.
                         ImageQuality = ctx.ImageQuality, // View > Display preference
                         ImageMode = ctx.ImageMode,
-                        // A tab connecting while not visible only streams if the toggle says so.
-                        VideoPaused = !ReferenceEquals(ctx, _ctx) && !_streamAllTabs,
                         // View > Full frame requests. Continuous (-1) asks for every frame in full.
                         AlwaysRequestFullFrames = ctx.FullFrameInterval == ContinuousRefresh,
                         // 1, not 0, in continuous: see ApplyFullRefreshInterval.
@@ -833,21 +882,33 @@ namespace ATENtion.App
                             ctx.FullFrameInterval == ContinuousRefresh ? 1 : ctx.FullFrameInterval,
                         LogInput = Core.Diagnostics.KvmLog.Enabled, // skip per-packet hex build when logging is off
                     };
-                    ctx.Session = session;
+                    var owned = session;
+                    // Cancelling closes the socket, so a close or reconnect does not wait out a slow
+                    // handshake. Runs at once if the token is already cancelled.
+                    abort = token.Register(() => { try { owned.Dispose(); } catch { } });
                     session.FrameDecoded += (s, e2) => OnFrameDecoded(ctx, e2);
-                    session.PrivilegeChanged += (s, e2) => OnPrivilegeChanged(ctx);
-                    // Faulted fires on the session's pump/watchdog thread; Dispatcher.Invoke marshals
-                    // the reconnect handling back onto the UI thread.
-                    session.Faulted += (s, ex) => Dispatcher.Invoke(() =>
+                    session.PrivilegeChanged += (s, e2) => OnPrivilegeChanged(ctx, owned);
+                    // Faulted fires on the pump or a timer thread. BeginInvoke, not Invoke: a teardown
+                    // on the UI thread may be joining that thread.
+                    session.Faulted += (s, ex) => Dispatcher.BeginInvoke(new Action(() =>
                     {
+                        if (!ReferenceEquals(ctx.Session, owned)) return;   // replaced or closed since
                         ctx.LiveConnected = false;
                         SetStats(ctx, "");
                         ScheduleReconnect(ctx, ex.Message);
-                    });
+                    }));
 
                     session.Open();
-                    Dispatcher.Invoke(() =>
+
+                    // Publish and start on the UI thread, in one step, so a close or a newer attempt
+                    // either happens entirely before (and this one is dropped) or entirely after (and
+                    // tears down a session that is fully running).
+                    bool published = Dispatcher.Invoke(() =>
                     {
+                        if (token.IsCancellationRequested) return false;
+                        ctx.Attempts.Complete(token);
+                        abort.Dispose();
+                        ctx.Session = owned;
                         ctx.ReconnectAttempts = 0; // healthy connection - reset the retry budget
                         ctx.QuietFailures = false;
                         _certHintShown = false; // allow the cert/clock hint again if a future drop needs it
@@ -859,14 +920,30 @@ namespace ATENtion.App
                         if (ReferenceEquals(ctx, _ctx)) UpdateTitle();
                         ShowOverlay(ctx, "Waiting for video...");
                         WireInput();
+                        ApplyStreaming(ctx, owned);   // decided here, against the tab visible now
+                        owned.StartPump();
+                        return true;
                     });
-                    session.StartPump();
+                    if (!published) owned.Dispose();
                 }
                 catch (Exception ex)
                 {
+                    abort.Dispose();
+                    if (token.IsCancellationRequested)
+                    {
+                        // Superseded or closed: the failure is expected and belongs to no one.
+                        try { session?.Dispose(); } catch { }
+                        return;
+                    }
                     Core.Diagnostics.KvmLog.Error("connect/handshake", ex);
                     Dispatcher.Invoke(() =>
                     {
+                        try { session?.Dispose(); } catch { }
+                        if (token.IsCancellationRequested) return;
+                        ctx.Attempts.Complete(token);
+                        // Quiet applies to the first attempt only; later ones are the user's own.
+                        bool quiet = ctx.QuietFailures;
+                        ctx.QuietFailures = false;
                         string why = ex.Message;
                         bool certClockError = IsCertClockError(ex);
                         if (certClockError)
@@ -894,7 +971,7 @@ namespace ATENtion.App
                             ShowOverlay(ctx, (loginSetupFailed ? "BMC login/session setup failed: " : "Connection failed: ") + why
                                 + "  -  use Connection ▸ Connect / Change server to edit the saved profile.");
                             if (ReferenceEquals(ctx, _ctx)) UpdateTitle();
-                            if (!certClockError && !ctx.QuietFailures)
+                            if (!certClockError && !quiet)
                             {
                                 MessageBox.Show(this,
                                     (loginSetupFailed
@@ -1066,10 +1143,9 @@ namespace ATENtion.App
             double sy = VideoImage.ActualHeight <= 0 ? 0 : _session.Decoder.Height / VideoImage.ActualHeight;
             int x = Clamp((int)(p.X * sx), 0, _session.Decoder.Width - 1);
             int y = Clamp((int)(p.Y * sy), 0, _session.Decoder.Height - 1);
-            _lastMouseX = x; _lastMouseY = y; // remembered so focus-loss can release a held button in place
+            _ctx.LastMouseX = x; _ctx.LastMouseY = y; // so a held button can be released in place
             _session.SendMouse(x, y, _buttonMask, coalesce: isMove);
         }
-        private int _lastMouseX, _lastMouseY;
 
         private void UpdateButtons(MouseButtonEventArgs e)
         {
@@ -1088,15 +1164,19 @@ namespace ATENtion.App
         /// anything still held on the host so it cannot stick - every held key (mirroring the original's
         /// releasePressedKeys) and any held mouse button. The release event would otherwise
         /// be delivered to whatever took focus, leaving a latched modifier or a stuck drag.</summary>
-        private void OnDeactivated(object sender, EventArgs e)
+        private void OnDeactivated(object sender, EventArgs e) => ReleaseHeldInput(_ctx);
+
+        /// <summary>Sends an up for every key and mouse button still held on a tab's host.</summary>
+        /// <remarks>Used when the window loses focus and when the user moves to another tab.</remarks>
+        private static void ReleaseHeldInput(SessionContext ctx)
         {
-            var s = _session;
-            if (s == null) return;
+            var s = ctx.Session;
+            if (s == null) { ctx.ButtonMask = 0; return; }
             s.ReleaseHeldKeys();
-            if (_buttonMask != 0)
+            if (ctx.ButtonMask != 0)
             {
-                s.SendMouse(_lastMouseX, _lastMouseY, 0); // button-up in place (no move)
-                _buttonMask = 0;
+                s.SendMouse(ctx.LastMouseX, ctx.LastMouseY, 0); // button-up in place (no move)
+                ctx.ButtonMask = 0;
             }
         }
 
@@ -1525,19 +1605,22 @@ namespace ATENtion.App
             // the lambdas (which close over this window) stay attached to the disposed session.
             // Capture the owning context: these fire from the media session's thread, possibly long
             // after the user switched tabs.
+            // BeginInvoke: these run on the media thread, which closing the tab joins.
             var owner = _ctx;
-            _vmFaulted = (sender, ex) => Dispatcher.Invoke(() =>
+            _vmFaulted = (sender, ex) => Dispatcher.BeginInvoke(new Action(() =>
             {
+                if (!ReferenceEquals(owner.Vmedia, vm)) return;   // unmounted or closed since
                 if (ReferenceEquals(owner, _ctx))
                     FlashStatus("Virtual media error: " + ex.Message);
                 ClearVmedia(owner);
-            });
-            _vmClosed = (sender, args) => Dispatcher.Invoke(() =>
+            }));
+            _vmClosed = (sender, args) => Dispatcher.BeginInvoke(new Action(() =>
             {
+                if (!ReferenceEquals(owner.Vmedia, vm)) return;
                 if (ReferenceEquals(owner, _ctx))
                     FlashStatus("Virtual media channel closed.");
                 ClearVmedia(owner);
-            });
+            }));
             vm.Faulted += _vmFaulted;
             vm.Closed += _vmClosed;
 

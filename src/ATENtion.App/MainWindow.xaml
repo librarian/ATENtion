@@ -120,7 +120,21 @@
                         Header="Keep _background tabs streaming"
                         IsCheckable="True"
                         Click="OnToggleStreamAllTabs"
-                        ToolTip="Off (default): only the visible tab requests video, so a hidden tab costs no bandwidth. On: every connected tab keeps streaming, which is useful for watching one machine boot while working on another - but each tab costs its own bandwidth, up to about 5 Mbps with Full frame requests set to Continuous."/>
+                        ToolTip="Off (default): only the visible tab streams video; hidden tabs only check in (see Check hidden tabs). On: every connected tab keeps streaming, which is useful for watching one machine boot while working on another - but each tab costs its own bandwidth, up to about 5 Mbps with Full frame requests set to Continuous."/>
+                <!-- A hidden tab asks for one full frame per interval. The reply, a picture or the
+                     no-signal marker, keeps its power glyph current and shows the link is alive. -->
+                <MenuItem Header="Check _hidden tabs"
+                        ToolTip="How often a tab that is not visible asks its BMC for one frame, to keep its power glyph current and notice a dropped link. Each check is one full frame: about 70 KB on ASPEED (X10 and later) boards, about 1.5 MB on X9 boards, which send them uncompressed.">
+                    <MenuItem x:Name="Check5Item" Header="Every _5 seconds"
+                            IsCheckable="True" Tag="5" Click="OnPausedCheckInterval"/>
+                    <MenuItem x:Name="Check10Item" Header="Every _10 seconds - default"
+                            IsCheckable="True" Tag="10" Click="OnPausedCheckInterval"/>
+                    <MenuItem x:Name="Check30Item" Header="Every _30 seconds"
+                            IsCheckable="True" Tag="30" Click="OnPausedCheckInterval"/>
+                    <Separator/>
+                    <MenuItem x:Name="CheckOffItem" Header="_Off - no traffic, the glyph goes stale"
+                            IsCheckable="True" Tag="0" Click="OnPausedCheckInterval"/>
+                </MenuItem>
                 <!-- The vendor viewer's "Display Preference": chroma/compression mode plus an image
                      quality level. Both are sent with changeScreenInfo (0x32) and take effect on the
                      running session. -->

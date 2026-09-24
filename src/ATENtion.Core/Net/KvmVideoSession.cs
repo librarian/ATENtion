@@ -146,11 +146,12 @@ namespace ATENtion.Core.Net
         public bool AlwaysRequestFullFrames { get; set; }
 
         /// <summary>
-        /// Stop requesting video while keeping the session, its keepalive and any mounted media up.
+        /// Stop streaming video while keeping the session, its keepalive and any mounted media up.
         /// </summary>
         /// <remarks>
-        /// Used for tabs that are not visible. The stall watchdog is suppressed while paused,
-        /// since it would otherwise read the expected silence as a dead link and reconnect.
+        /// Used for tabs that are not visible. A paused session still asks for one full frame every
+        /// <see cref="PausedCheckSeconds"/>, which keeps <see cref="VideoSignal"/> current and lets
+        /// the watchdog notice a dead link.
         /// </remarks>
         public bool VideoPaused
         {
@@ -158,11 +159,21 @@ namespace ATENtion.Core.Net
             set
             {
                 if (_videoPaused == value) return;
+                System.Threading.Interlocked.Exchange(ref _pausedTicks, 0);
                 _videoPaused = value;
                 if (!value) ResumeVideo();
             }
         }
         private volatile bool _videoPaused;
+        private int _pausedTicks;
+
+        /// <summary>Seconds between the single full-frame checks a paused session makes. 0 stops them.</summary>
+        /// <remarks>
+        /// A full request is always answered, with a picture or with the no-signal marker, so each
+        /// check refreshes <see cref="VideoSignal"/>. The cost is one full frame per check: about
+        /// 70 KB on ASPEED boards, but about 1.5 MB on Hermon (X9) boards, which send them raw.
+        /// </remarks>
+        public int PausedCheckSeconds { get; set; } = 10;
 
         // Re-arm after a pause: the watchdog's clock has to be reset before requests resume, or the
         // silence accumulated while paused counts against it. A full frame repaints the surface,
@@ -209,6 +220,9 @@ namespace ATENtion.Core.Net
         /// one that is running and not producing video.
         /// </remarks>
         public VideoSignalState VideoSignal { get; private set; } = VideoSignalState.Unknown;
+
+        /// <summary>UTC time <see cref="VideoSignal"/> was last confirmed by a frame or a no-signal marker.</summary>
+        public DateTime VideoSignalUtc { get; private set; }
 
         /// <summary>Input-control state from the server privilege grant (msg 0x39): true = this session
         /// controls input, false = view-only, null = not yet reported. See <see cref="PrivilegeChanged"/>.</summary>
@@ -274,7 +288,12 @@ namespace ATENtion.Core.Net
             {
                 try
                 {
-                    if (!_running || _videoPaused) return;
+                    if (!_running) return;
+                    if (_videoPaused)
+                    {
+                        if (PausedCheckDue()) SendUpdate(incremental: false);
+                        return;
+                    }
                     int t = System.Threading.Interlocked.Increment(ref _ticksSinceFull);
                     if (FullRefreshIntervalTicks > 0 && t >= FullRefreshIntervalTicks)
                         SendUpdate(incremental: false);                       // periodic forced full repairs any delta drift
@@ -301,14 +320,47 @@ namespace ATENtion.Core.Net
             _watchdogTimer = new Timer(_ => { try { WatchdogTick(); } catch (Exception ex) { Diagnostics.KvmLog.Error("watchdog", ex); } }, null, 2000, 2000);
         }
 
+        // One tick of the paused request timer: true when a check is due.
+        private bool PausedCheckDue()
+        {
+            int every = PausedCheckSeconds;
+            if (every <= 0) return false;
+            if (System.Threading.Interlocked.Increment(ref _pausedTicks) < every) return false;
+            System.Threading.Interlocked.Exchange(ref _pausedTicks, 0);
+            return true;
+        }
+
+        /// <summary>What the watchdog should do after a given silence.</summary>
+        internal enum StallAction { None, Probe, Fault }
+
+        /// <summary>The watchdog's decision, kept separate from the timer so it can be tested.</summary>
+        /// <remarks>
+        /// While paused the only traffic expected is the reply to each check, so the fault threshold
+        /// is extended by one check interval and there is no separate probe: the next check is one.
+        /// With checks turned off a paused session expects nothing, and silence proves nothing.
+        /// </remarks>
+        internal static StallAction EvaluateStall(double idleSeconds, bool paused, int pausedCheckSeconds,
+                                                  int probeSeconds, int timeoutSeconds)
+        {
+            if (paused)
+            {
+                if (pausedCheckSeconds <= 0 || timeoutSeconds <= 0) return StallAction.None;
+                return idleSeconds >= pausedCheckSeconds + timeoutSeconds ? StallAction.Fault : StallAction.None;
+            }
+            if (timeoutSeconds > 0 && idleSeconds >= timeoutSeconds) return StallAction.Fault;
+            if (probeSeconds > 0 && idleSeconds >= probeSeconds) return StallAction.Probe;
+            return StallAction.None;
+        }
+
         /// <summary>Watchdog body (off the timer thread): probe after a soft stall, fault after a hard one.</summary>
         private void WatchdogTick()
         {
-            if (!_running || _videoPaused) return;   // no video expected, so silence proves nothing
+            if (!_running) return;
             double idle = (DateTime.UtcNow - LastMessageUtc).TotalSeconds;
+            var action = EvaluateStall(idle, _videoPaused, PausedCheckSeconds, StallProbeSeconds, StallTimeoutSeconds);
 
             // Hard stall: even a forced-full probe went unanswered -> declare the link dead.
-            if (StallTimeoutSeconds > 0 && idle >= StallTimeoutSeconds)
+            if (action == StallAction.Fault)
             {
                 RaiseFault(new System.IO.IOException(
                     $"No video/response from BMC for {(int)idle}s - connection stalled."));
@@ -318,7 +370,7 @@ namespace ATENtion.Core.Net
             // Soft stall: nudge the BMC with one forced-full FBUR. A live BMC always answers (even
             // on a static screen), which refreshes LastMessageUtc and re-primes a stuck pipeline; a
             // dead one stays silent until the hard-stall fault above. One probe per stall window.
-            if (StallProbeSeconds > 0 && idle >= StallProbeSeconds)
+            if (action == StallAction.Probe)
             {
                 if (System.Threading.Interlocked.Exchange(ref _probedThisStall, 1) == 0)
                 {
@@ -472,10 +524,15 @@ namespace ATENtion.Core.Net
 
                         PrivilegeChanged?.Invoke(this, EventArgs.Empty);
                     }
-                    if (msg.NoVideoSignal) VideoSignal = VideoSignalState.Absent;
+                    if (msg.NoVideoSignal)
+                    {
+                        VideoSignal = VideoSignalState.Absent;
+                        VideoSignalUtc = DateTime.UtcNow;
+                    }
                     if (msg.IsFrame)
                     {
                         VideoSignal = VideoSignalState.Present;
+                        VideoSignalUtc = DateTime.UtcNow;
                         FramesDecoded++;
                         LastFrameUtc = DateTime.UtcNow;
                         System.Threading.Interlocked.Decrement(ref _outstanding); // this frame answered one request
@@ -695,8 +752,8 @@ namespace ATENtion.Core.Net
         }
 
         /// <summary>Release every key currently held down (send an up for each) and clear the held set.
-        /// Call when the viewer loses focus so a modifier (or any key) can't stick on the host if the
-        /// user Alt-Tabs or clicks away mid-hold. Releases are non-coalescible, so they are never shed.
+        /// Call when the viewer loses focus or the user switches tabs, so a key held at that moment
+        /// cannot stay down on the host. Releases are non-coalescible, so they are never shed.
         /// Mirrors the original viewer's <c>releasePressedKeys()</c>. No-op if nothing held.</summary>
         public void ReleaseHeldKeys()
         {
@@ -710,7 +767,7 @@ namespace ATENtion.Core.Net
                 _heldKeys.Clear();
             }
             _inputSignal.Set();
-            if (LogInput) Diagnostics.KvmLog.Write($"input: released {n} held key(s) on focus loss.");
+            if (LogInput) Diagnostics.KvmLog.Write($"input: released {n} held key(s).");
         }
 
         /// <summary>Tally a shed auto-repeat and emit at most ~1 diagnostic line/sec (logging on).</summary>
@@ -799,10 +856,19 @@ namespace ATENtion.Core.Net
             // reconnect cycles from leaking threads/handles. _running is already false, so the pump's
             // read-throws-on-close lands in its catch as an expected teardown (no spurious Faulted).
             try { _connection?.Dispose(); } catch { }
-            try { _pumpThread?.Join(2000); } catch { }
-            try { _senderThread?.Join(1000); } catch { }
-            try { _inputSignal.Dispose(); } catch { }
-            try { Decoder?.Dispose(); } catch { }   // frees the native ASPEED context
+            bool pumpExited = JoinQuietly(_pumpThread, 2000);
+            bool senderExited = JoinQuietly(_senderThread, 1000);
+            // A worker that has not stopped may still touch these, so leak them rather than free
+            // them underneath it. Freeing the native decoder context would be a use-after-free.
+            if (senderExited) try { _inputSignal.Dispose(); } catch { }
+            if (pumpExited) try { Decoder?.Dispose(); } catch { }   // frees the native ASPEED context
+            else Diagnostics.KvmLog.Write("Receive pump did not stop within 2s; leaving the decoder allocated.");
+        }
+
+        private static bool JoinQuietly(Thread thread, int timeoutMs)
+        {
+            if (thread == null || thread == Thread.CurrentThread) return thread == null;
+            try { return thread.Join(timeoutMs); } catch { return false; }
         }
     }
 }

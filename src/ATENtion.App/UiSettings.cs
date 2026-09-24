@@ -49,6 +49,8 @@ namespace ATENtion.App
         public int ImageQuality = 11;
         /// <summary>True to let tabs that are not visible keep requesting video.</summary>
         public bool StreamAllTabs;
+        /// <summary>Seconds between the checks a hidden tab makes on its host; 0 for none.</summary>
+        public int HiddenTabCheckSeconds = 10;
         /// <summary>True to reopen the tabs that were open at exit.</summary>
         public bool ReopenTabs = true;
         /// <summary>Profile ids of the tabs open at exit, in tab order.</summary>
@@ -78,6 +80,7 @@ namespace ATENtion.App
                 ImageMode = st.ImageMode,
                 ImageQuality = st.ImageQuality,
                 StreamAllTabs = st.StreamAllTabs,
+                HiddenTabCheckSeconds = st.HiddenTabCheckSeconds,
                 ReopenTabs = st.ReopenTabs,
                 OpenProfileIds = new System.Collections.Generic.List<string>(st.OpenProfileIds),
                 ActiveProfileId = st.ActiveProfileId,
@@ -103,6 +106,7 @@ namespace ATENtion.App
             st.ImageMode = ImageMode;
             st.ImageQuality = ImageQuality;
             st.StreamAllTabs = StreamAllTabs;
+            st.HiddenTabCheckSeconds = HiddenTabCheckSeconds;
             st.ReopenTabs = ReopenTabs;
             st.OpenProfileIds.Clear();
             if (OpenProfileIds != null) st.OpenProfileIds.AddRange(OpenProfileIds);

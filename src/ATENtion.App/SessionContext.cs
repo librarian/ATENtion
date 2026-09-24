@@ -23,8 +23,13 @@ namespace ATENtion.App
     /// threads and must be marshalled first. <see cref="ReconnectTimer"/>'s Tag carries this context
     /// so the shared tick handler knows which session fired.
     /// </para>
+    /// <para>
+    /// LIFETIME - The context owns everything its tab starts: the connection attempt, the session
+    /// and its threads, mounted media and the reconnect timer. <see cref="Dispose"/> ends all of them
+    /// and marks the tab closed, so work still in flight for it discards its result.
+    /// </para>
     /// </remarks>
-    public sealed class SessionContext : INotifyPropertyChanged
+    public sealed class SessionContext : INotifyPropertyChanged, IDisposable
     {
         public event PropertyChangedEventHandler PropertyChanged;
 
@@ -53,6 +58,12 @@ namespace ATENtion.App
         public readonly DispatcherTimer ReconnectTimer = new DispatcherTimer();
         public int ReconnectAttempts;
 
+        /// <summary>The connection attempt in flight, and whether this tab has been closed.</summary>
+        internal readonly ConnectAttempts Attempts = new ConnectAttempts();
+
+        /// <summary>True once the tab is closed.</summary>
+        public bool IsClosed => Attempts.IsClosed;
+
         // Presentation state: the snapshot the UI thread paints from, and the regions that changed.
         public byte[] Present;
         public int PresentW, PresentH, PresentStride;
@@ -70,6 +81,8 @@ namespace ATENtion.App
         public DateTime? ConnectedAt;
         public int NoFrameTicks;
         public int ButtonMask;
+        /// <summary>Where the pointer last was on this host, so a held button can be released in place.</summary>
+        public int LastMouseX, LastMouseY;
 
         // Status-bar and overlay text for this tab, replayed when it becomes visible.
         public string StatusText = "Ready";
@@ -89,17 +102,25 @@ namespace ATENtion.App
         public long LastFrames, LastBytes, LastFps, LastRateBytes;
 
         private VideoSignalState _power = VideoSignalState.Unknown;
+        private string _powerTip = PowerStatus.Tip(VideoSignalState.Unknown, null);
 
         /// <summary>Host state as far as the video signal reveals it.</summary>
-        public VideoSignalState Power
+        public VideoSignalState Power => _power;
+
+        /// <summary>Sets the glyph's state and how long ago it was confirmed.</summary>
+        /// <param name="checkedAgo">Null while the tab streams; the age of the last check while paused.</param>
+        public void UpdatePower(VideoSignalState state, TimeSpan? checkedAgo)
         {
-            get => _power;
-            set
+            if (_power != state)
             {
-                if (_power == value) return;
-                _power = value;
+                _power = state;
                 Raise(nameof(Power));
                 Raise(nameof(PowerBrush));
+            }
+            string tip = PowerStatus.Tip(state, checkedAgo);
+            if (tip != _powerTip)
+            {
+                _powerTip = tip;
                 Raise(nameof(PowerTip));
             }
         }
@@ -112,21 +133,7 @@ namespace ATENtion.App
         public Brush PowerBrush =>
             _power == VideoSignalState.Present ? StatusColors.Controlling : PowerUnknownBrush;
 
-        public string PowerTip
-        {
-            get
-            {
-                switch (_power)
-                {
-                    case VideoSignalState.Present:
-                        return "Host on - video signal present";
-                    case VideoSignalState.Absent:
-                        return "No video signal - host is off, or on but not producing video";
-                    default:
-                        return "No video signal information yet - not connected, or no frame seen";
-                }
-            }
-        }
+        public string PowerTip => _powerTip;
 
         // Lifted off the tab strip's #252526 so it reads as "no picture", not a missing glyph.
         private static readonly Brush PowerUnknownBrush = MakeFrozen(0x55, 0x55, 0x55);
@@ -152,7 +159,7 @@ namespace ATENtion.App
         {
             get
             {
-                if (Session == null) return "–";
+                if (Session == null) return Attempts.IsRunning ? "…" : "–";
                 if (!LiveConnected) return "…";
                 return Vmedia != null ? "● CD" : "●";
             }
@@ -170,6 +177,34 @@ namespace ATENtion.App
                         : !string.IsNullOrWhiteSpace(host) ? host
                         : "New session";
             Raise(nameof(TabTip));
+        }
+
+        /// <summary>Ends everything this tab started and marks it closed.</summary>
+        /// <remarks>
+        /// Handlers are detached before the media session is disposed so its closing does not report
+        /// back into a tab that no longer exists. The KVM session's handlers check
+        /// <see cref="IsClosed"/> instead, since they are lambdas with no field to unsubscribe.
+        /// </remarks>
+        public void Dispose()
+        {
+            Attempts.Close();
+            ReconnectTimer.Stop();
+
+            var media = Vmedia;
+            Vmedia = null;
+            if (media != null)
+            {
+                if (VmFaulted != null) media.Faulted -= VmFaulted;
+                if (VmClosed != null) media.Closed -= VmClosed;
+                try { media.Dispose(); } catch { }
+            }
+            VmFaulted = null;
+            VmClosed = null;
+
+            var session = Session;
+            Session = null;
+            try { session?.Dispose(); } catch { }
+            LiveConnected = false;
         }
 
         /// <summary>Hover text for the tab: the profile name and the address it resolves to.</summary>

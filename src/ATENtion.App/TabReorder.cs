@@ -2,7 +2,7 @@ using System.Collections.Generic;
 
 namespace ATENtion.App
 {
-    /// <summary>Where a tab being dragged should sit in the strip.</summary>
+    /// <summary>Tab strip positions: where a dragged tab lands, and which tab follows a closed one.</summary>
     internal static class TabReorder
     {
         /// <summary>
@@ -23,5 +23,12 @@ namespace ATENtion.App
                 if (pointerX > midpoint) index++;
             return index;
         }
+
+        /// <summary>The tab to show when the visible one closes: the one to its right, or the last.</summary>
+        /// <param name="closingIndex">Index of the closing tab, before it is removed.</param>
+        /// <param name="count">Number of tabs, including the closing one. At least two.</param>
+        /// <returns>An index into the list as it is before the removal.</returns>
+        internal static int NeighbourAfterClose(int closingIndex, int count) =>
+            closingIndex < count - 1 ? closingIndex + 1 : closingIndex - 1;
     }
 }
