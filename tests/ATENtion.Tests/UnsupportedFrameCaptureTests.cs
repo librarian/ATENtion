@@ -27,6 +27,7 @@ namespace ATENtion.Tests
                 Assert.Equal(dumpPath, KvmLog.TryCaptureUnsupportedFrame(first));
                 Assert.Null(KvmLog.TryCaptureUnsupportedFrame(second));
                 Assert.Equal(first, File.ReadAllBytes(dumpPath));
+								KvmLog.FilePath = null;
                 Assert.Contains("Captured first unsupported video packet", File.ReadAllText(logPath));
             }
             finally
