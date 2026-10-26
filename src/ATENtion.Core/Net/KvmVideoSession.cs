@@ -847,9 +847,10 @@ namespace ATENtion.Core.Net
             }
             if (dropped) { NoteDroppedRepeat(); return; }
             Wake();
-            if (LogInput)
-                Diagnostics.KvmLog.Write($"TX key keysym=0x{keysym:x4} {(down ? "down" : "up")}{(autoRepeat ? " (repeat)" : "")} : " +
-                                         Diagnostics.KvmLog.Hex(frame));
+            // Which key is deliberately not logged: it would put whatever is typed on the host,
+            // passwords included, into the log file.
+            if (LogInput && !autoRepeat)
+                Diagnostics.KvmLog.Write($"TX key {(down ? "down" : "up")}");
         }
 
         /// <summary>Release every key currently held down (send an up for each) and clear the held set.
