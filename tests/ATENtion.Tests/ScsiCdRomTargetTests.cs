@@ -140,6 +140,45 @@ namespace ATENtion.Tests
         }
 
         [Fact]
+        public void ReadToc_SessionInfo_DescribesOneSession()
+        {
+            var r = _target.Execute(Cbw(20, 12, true, 0x43, 0, 1, 0, 0, 0, 0, 0, 12, 0));
+            Assert.Equal(0, r.Status);
+            Assert.Equal(new byte[] { 0, 10, 1, 1, 0, 0x14, 1, 0, 0, 0, 0, 0 }, r.Data);
+        }
+
+        [Fact]
+        public void ReadToc_FromLeadOut_ReturnsOnlyTheLeadOut()
+        {
+            var r = _target.Execute(Cbw(21, 20, true, 0x43, 0, 0, 0, 0, 0, 0xAA, 0, 20, 0));
+            Assert.Equal(0, r.Status);
+            Assert.Equal(12, r.Data.Length);
+            Assert.Equal(0xAA, r.Data[6]);
+            Assert.Equal((byte)Sectors, r.Data[11]);   // lead-out LBA = disc length
+        }
+
+        [Fact]
+        public void ReadToc_FromMissingTrack_IsCheckCondition()
+        {
+            var r = _target.Execute(Cbw(22, 20, true, 0x43, 0, 0, 0, 0, 0, 2, 0, 20, 0));
+            Assert.Equal(1, r.Status);
+            var sense = _target.Execute(Cbw(23, 18, true, 0x03, 0, 0, 0, 18, 0));
+            Assert.Equal(0x05, sense.Data[2]);   // ILLEGAL REQUEST
+            Assert.Equal(0x24, sense.Data[12]);  // INVALID FIELD IN CDB
+        }
+
+        [Theory]
+        [InlineData(0x2A, 38)]
+        [InlineData(0x3F, 38)]
+        [InlineData(0x01, 8)]    // a page this target has no data for: header only
+        public void ModeSense10_ReturnsOnlyTheRequestedPage(int page, int expectedLength)
+        {
+            var r = _target.Execute(Cbw(24, 255, true, 0x5A, 0, (byte)page, 0, 0, 0, 0, 0, 255, 0));
+            Assert.Equal(0, r.Status);
+            Assert.Equal(expectedLength, r.Data.Length);
+        }
+
+        [Fact]
         public void LinuxMmcDiscoveryCommands_AreSupported()
         {
             var config = _target.Execute(Cbw(11, 152, true, 0x46, 0, 0, 0, 0, 0, 0, 0, 152, 0));
