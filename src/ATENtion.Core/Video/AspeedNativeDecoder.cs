@@ -24,6 +24,37 @@ namespace ATENtion.Core.Video
             IntPtr input, int inputLength, IntPtr output, int width, int height,
             uint mode420, uint selector, uint advanceSelector);
 
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "aspeed_decode_ctx")]
+        private static extern void NativeDecodeCtx(
+            IntPtr context, IntPtr input, int inputLength, IntPtr output, int width, int height,
+            uint mode420, uint selector, uint advanceSelector);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "aspeed_ctx_new")]
+        private static extern IntPtr NativeContextNew();
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "aspeed_ctx_free")]
+        private static extern void NativeContextFree(IntPtr context);
+
+        /// <summary>
+        /// Allocates a decoder context so this session's 2-pass buffer and quantisation tables are
+        /// its own; sessions sharing them decode each other's state.
+        /// </summary>
+        /// <returns>The context, or <see cref="IntPtr.Zero"/> to fall back to the shared state.</returns>
+        internal static IntPtr CreateContext()
+        {
+            lock (Sync)
+            {
+                EnsureInitialized();
+                return NativeContextNew();
+            }
+        }
+
+        internal static void DestroyContext(IntPtr context)
+        {
+            if (context == IntPtr.Zero) return;
+            lock (Sync) NativeContextFree(context);
+        }
+
         internal static void VerifyAvailable()
         {
             lock (Sync)
@@ -32,7 +63,7 @@ namespace ATENtion.Core.Video
             }
         }
 
-        internal static void Decode(byte[] packet, FrameBuffer frame)
+        internal static void Decode(byte[] packet, FrameBuffer frame, IntPtr context)
         {
             if (packet == null) throw new ArgumentNullException(nameof(packet));
             if (frame == null) throw new ArgumentNullException(nameof(frame));
@@ -53,15 +84,15 @@ namespace ATENtion.Core.Video
 
                     inputHandle = GCHandle.Alloc(packet, GCHandleType.Pinned);
                     outputHandle = GCHandle.Alloc(frame.Pixels, GCHandleType.Pinned);
-                    NativeDecode(
-                        IntPtr.Add(inputHandle.AddrOfPinnedObject(), AspeedPacketHeader.Size),
-                        packet.Length - AspeedPacketHeader.Size,
-                        outputHandle.AddrOfPinnedObject(),
-                        frame.Width,
-                        frame.Height,
-                        (uint)header.Mode420,
-                        header.Selector,
-                        header.AdvanceSelector);
+                    IntPtr input = IntPtr.Add(inputHandle.AddrOfPinnedObject(), AspeedPacketHeader.Size);
+                    int length = packet.Length - AspeedPacketHeader.Size;
+                    IntPtr output = outputHandle.AddrOfPinnedObject();
+                    if (context != IntPtr.Zero)
+                        NativeDecodeCtx(context, input, length, output, frame.Width, frame.Height,
+                                        (uint)header.Mode420, header.Selector, header.AdvanceSelector);
+                    else
+                        NativeDecode(input, length, output, frame.Width, frame.Height,
+                                     (uint)header.Mode420, header.Selector, header.AdvanceSelector);
                 }
                 finally
                 {
