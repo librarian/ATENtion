@@ -53,7 +53,8 @@ namespace ATENtion.Core.Net
             // bytes the write side still needs. The write path stays on the raw transport with an
             // explicit Flush(). Routing writes through a second buffer over the same stream would
             // desynchronise the two.
-            _readStream = new BufferedStream(stream, 65536);
+            // Larger than a full frame at any supported resolution, so one frame is one fill.
+            _readStream = new BufferedStream(stream, 262144);
         }
 
         // ---- writes (sent to the transport directly; TCP and the transport coalesce them) ----
