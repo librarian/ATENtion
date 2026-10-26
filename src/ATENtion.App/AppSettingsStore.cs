@@ -54,8 +54,11 @@ namespace ATENtion.App
         /// <summary>Most frames a second a tab asks for; 0 for no limit.</summary>
         public string LastProfileId = "";
         /// <summary>Reopen the tabs that were open when the window closed.</summary>
+        public bool ReopenTabs = true;
         /// <summary>Profile ids of the tabs open at exit, in tab order.</summary>
+        public readonly List<string> OpenProfileIds = new List<string>();
         /// <summary>Profile id of the tab that was visible at exit.</summary>
+        public string ActiveProfileId = "";
         public readonly List<StoredConnectionProfile> Profiles = new List<StoredConnectionProfile>();
 
         internal static string SettingsPath => _settingsPathOverride ?? Path.Combine(
@@ -100,7 +103,12 @@ namespace ATENtion.App
                     new XAttribute("autoReconnect", AutoReconnect),
                     new XAttribute("enableLogging", EnableLogging),
                     new XAttribute("mouseMode", MouseMode),
-                    new XAttribute("streamAllTabs", StreamAllTabs));
+                    new XAttribute("streamAllTabs", StreamAllTabs),
+                    new XAttribute("reopenTabs", ReopenTabs));
+
+                var tabs = new XElement("OpenTabs", new XAttribute("active", ActiveProfileId ?? ""));
+                foreach (string id in OpenProfileIds)
+                    if (!string.IsNullOrEmpty(id)) tabs.Add(new XElement("Tab", new XAttribute("profile", id)));
 
                 var profiles = new XElement("Connections",
                     new XAttribute("lastProfileId", LastProfileId ?? ""));
@@ -118,7 +126,7 @@ namespace ATENtion.App
                 }
 
                 var document = new XDocument(
-                    new XElement("ATENtionSettings", new XAttribute("formatVersion", "1"), ui, profiles));
+                    new XElement("ATENtionSettings", new XAttribute("formatVersion", "1"), ui, profiles, tabs));
                 string temporary = path + ".tmp";
                 document.Save(temporary);
                 if (!File.Exists(path))
@@ -161,6 +169,7 @@ namespace ATENtion.App
                     result.EnableLogging = Bool(ui, "enableLogging");
                     result.MouseMode = Int(ui, "mouseMode", 1);
                     result.StreamAllTabs = Bool(ui, "streamAllTabs");
+                    result.ReopenTabs = Bool(ui, "reopenTabs", true);
                 }
 
                 var connections = root.Element("Connections");
@@ -171,6 +180,16 @@ namespace ATENtion.App
                     {
                         var profile = ReadProfile(item);
                         if (profile != null) result.Profiles.Add(profile);
+                    }
+                }
+                var tabs = root.Element("OpenTabs");
+                if (tabs != null)
+                {
+                    result.ActiveProfileId = Text(tabs, "active");
+                    foreach (var tab in tabs.Elements("Tab"))
+                    {
+                        string id = Text(tab, "profile");
+                        if (id.Length > 0) result.OpenProfileIds.Add(id);
                     }
                 }
                 return result;

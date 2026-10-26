@@ -48,8 +48,11 @@ namespace ATENtion.App
         public bool StreamAllTabs;
         /// <summary>Most frames a second a tab asks for; 0 for no limit.</summary>
         /// <summary>True to reopen the tabs that were open at exit.</summary>
+        public bool ReopenTabs = true;
         /// <summary>Profile ids of the tabs open at exit, in tab order.</summary>
+        public System.Collections.Generic.List<string> OpenProfileIds = new System.Collections.Generic.List<string>();
         /// <summary>Profile id of the tab that was visible at exit.</summary>
+        public string ActiveProfileId = "";
 
         /// <summary>Loads the UI settings from the store.</summary>
         /// <returns>The persisted settings, or the defaults on first run.</returns>
@@ -70,6 +73,9 @@ namespace ATENtion.App
                 EnableLogging = st.EnableLogging,
                 MouseMode = st.MouseMode,
                 StreamAllTabs = st.StreamAllTabs,
+                ReopenTabs = st.ReopenTabs,
+                OpenProfileIds = new System.Collections.Generic.List<string>(st.OpenProfileIds),
+                ActiveProfileId = st.ActiveProfileId,
             };
         }
 
@@ -89,6 +95,10 @@ namespace ATENtion.App
             st.EnableLogging = EnableLogging;
             st.MouseMode = MouseMode;
             st.StreamAllTabs = StreamAllTabs;
+            st.ReopenTabs = ReopenTabs;
+            st.OpenProfileIds.Clear();
+            if (OpenProfileIds != null) st.OpenProfileIds.AddRange(OpenProfileIds);
+            st.ActiveProfileId = ActiveProfileId ?? "";
             st.Save();
         }
     }

@@ -116,6 +116,23 @@ namespace ATENtion.App.Tests
             Assert.Equal("Rack B", profiles.Single(p => p.Id == b.Id).Name);
         }
 
+        [Fact]
+        public void Open_Tabs_Round_Trip_In_Order()
+        {
+            var ui = new UiSettings
+            {
+                ReopenTabs = true,
+                OpenProfileIds = new System.Collections.Generic.List<string> { "b", "a", "c" },
+                ActiveProfileId = "a",
+            };
+            ui.Save();
+
+            StableSettingsStore.ResetForTests(_settingsPath);
+            var loaded = UiSettings.Load();
+            Assert.True(loaded.ReopenTabs);
+            Assert.Equal(new[] { "b", "a", "c" }, loaded.OpenProfileIds);
+            Assert.Equal("a", loaded.ActiveProfileId);
+        }
 
         [Fact]
         public void An_Unreadable_Settings_File_Is_Kept_Rather_Than_Overwritten()
