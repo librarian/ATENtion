@@ -645,8 +645,8 @@ namespace ATENtion.App
             ctx.Session = null;
             // Off the UI thread: disposing waits for the session's threads to stop. The web login
             // that armed it is closed after it; see SessionContext.EndSession.
-            SessionContext.DisposeInBackground(old);
-            ClearVmedia(ctx);
+            SessionContext.EndSession(old, ctx.WebLogin);
+            ctx.WebLogin = null;
             // Mounted media is left alone. Its channel is separate, and tested on an X10 board it
             // kept serving the host through the video session closing, a fresh web login and a new
             // video session, so a video reconnect need not pull the disc out of an install.
@@ -961,6 +961,7 @@ namespace ATENtion.App
                         ctx.Attempts.Complete(token);
                         abort.Dispose();
                         ctx.Session = owned;
+                        ctx.WebLogin = arming;     // closed when this session ends (TearDownSession)
                         ctx.ReconnectAttempts = 0; // healthy connection - reset the retry budget
                         ctx.QuietFailures = false;
                         _certHintShown = false; // allow the cert/clock hint again if a future drop needs it
@@ -979,11 +980,13 @@ namespace ATENtion.App
                     if (!published)
                     {
                         owned.Dispose();
+                        Core.Net.BmcArmingClient.Logout(arming);
                     }
                 }
                 catch (Exception ex)
                 {
                     abort.Dispose();
+                    Core.Net.BmcArmingClient.Logout(arming);   // the attempt failed: nothing uses this login
                     if (token.IsCancellationRequested)
                     {
                         // Superseded or closed: the failure is expected and belongs to no one.
