@@ -228,6 +228,18 @@ namespace ATENtion.Core.Net
             _watchdogTimer = new Timer(_ => { try { WatchdogTick(); } catch (Exception ex) { Diagnostics.KvmLog.Error("watchdog", ex); } }, null, 2000, 2000);
         }
 
+        // Keeps PipelineDepth requests in flight, no faster than MinFrameIntervalMs allows.
+        private void TopUp()
+        {
+            while (_running &&
+                   System.Threading.Volatile.Read(ref _outstanding) < PipelineDepth)
+            {
+                SendUpdate(incremental: true);
+            }
+        }
+
+        // One FramebufferUpdate arrived: one request is no longer in flight. Never below zero, since
+        // the BMC may send an update nobody asked for.
         /// <summary>Watchdog body (off the timer thread): probe after a soft stall, fault after a hard one.</summary>
         private void WatchdogTick()
         {
@@ -295,10 +307,12 @@ namespace ATENtion.Core.Net
 
         /// <summary>Force a fresh full (non-incremental) frame now - repaints the whole
         /// surface, clearing any stale tiles. Wired to the UI's manual refresh.</summary>
+        /// <remarks>Sent by the input thread, so a caller on the UI thread never blocks on the socket.</remarks>
         public void RequestFullRefresh()
         {
             try { SendUpdate(incremental: false); } catch (Exception ex) { Diagnostics.KvmLog.Error("manual refresh", ex); }
         }
+
 
         /// <summary>Issues one framebuffer-update request and accounts for it in the request
         /// pipeline. The per-cycle message is the FramebufferUpdateRequest alone: runImage
@@ -307,6 +321,7 @@ namespace ATENtion.Core.Net
         /// (FUN_180011950 + FUN_180013060).</summary>
         private void SendUpdate(bool incremental)
         {
+
             // Per-cycle message is JUST the FramebufferUpdateRequest. The original viewer sends
             // runImage ([7,0x0780]) only ONCE at startup, not every cycle (pcap) -
             // sending it per frame was ~hundreds of extra messages and likely extra BMC frames.
@@ -388,23 +403,24 @@ namespace ATENtion.Core.Net
                     {
                         FramesDecoded++;
                         LastFrameUtc = DateTime.UtcNow;
-                        System.Threading.Interlocked.Decrement(ref _outstanding); // this frame answered one request
+                        System.Threading.Interlocked.Decrement(ref _outstanding);
                         FrameDecoded?.Invoke(this, new FrameDecodedEventArgs(Decoder.Frame, msg.Dirty));
                         if (msg.Resized)
                         {
                             // Resolution changed -> one full keyframe to repaint the new-size surface.
-                            // This also restores pipeline depth (−1 consumed above, +1 here).
+                            // This also restores pipeline depth (-1 released above, +1 here).
                             SendUpdate(incremental: false);
                         }
                         else
                         {
-                            // Top the pipeline back up to PipelineDepth. Steady state is exactly one
+                            // Top the pipeline back up to PipelineDepth. Only after a picture: topping up
+                            // after a no-signal reply would loop request and reply as fast as the link
+                            // allows while the host is off. Steady state is exactly one
                             // request per frame consumed (consume 1 -> send 1), so depth is bounded at
                             // PipelineDepth and cannot storm. The pump never blocks on the UI (the
                             // present is async), so it keeps draining the socket and the BMC keeps
                             // servicing input.
-                            while (_running && System.Threading.Volatile.Read(ref _outstanding) < PipelineDepth)
-                                SendUpdate(incremental: true);
+                            TopUp();
                         }
                     }
                 }
@@ -604,8 +620,8 @@ namespace ATENtion.Core.Net
         }
 
         /// <summary>Release every key currently held down (send an up for each) and clear the held set.
-        /// Call when the viewer loses focus so a modifier (or any key) can't stick on the host if the
-        /// user Alt-Tabs or clicks away mid-hold. Releases are non-coalescible, so they are never shed.
+        /// Call when the viewer loses focus or the user switches tabs, so a key held at that moment
+        /// cannot stay down on the host. Releases are non-coalescible, so they are never shed.
         /// Mirrors the original viewer's <c>releasePressedKeys()</c>. No-op if nothing held.</summary>
         public void ReleaseHeldKeys()
         {
@@ -708,9 +724,19 @@ namespace ATENtion.Core.Net
             // reconnect cycles from leaking threads/handles. _running is already false, so the pump's
             // read-throws-on-close lands in its catch as an expected teardown (no spurious Faulted).
             try { _connection?.Dispose(); } catch { }
-            try { _pumpThread?.Join(2000); } catch { }
-            try { _senderThread?.Join(1000); } catch { }
-            try { _inputSignal.Dispose(); } catch { }
+            bool pumpExited = JoinQuietly(_pumpThread, 2000);
+            bool senderExited = JoinQuietly(_senderThread, 1000);
+            // A worker that has not stopped may still touch these, so leak them rather than free
+            // them underneath it. Freeing the native decoder context would be a use-after-free.
+            if (senderExited) try { _inputSignal.Dispose(); } catch { }
+            if (pumpExited) try { Decoder?.Dispose(); } catch { }   // frees the native ASPEED context
+            else Diagnostics.KvmLog.Write("Receive pump did not stop within 2s; leaving the decoder allocated.");
+        }
+
+        private static bool JoinQuietly(Thread thread, int timeoutMs)
+        {
+            if (thread == null || thread == Thread.CurrentThread) return thread == null;
+            try { return thread.Join(timeoutMs); } catch { return false; }
         }
     }
 }
