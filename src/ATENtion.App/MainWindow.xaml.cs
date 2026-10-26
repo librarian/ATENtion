@@ -1668,7 +1668,7 @@ namespace ATENtion.App
         /// <summary>Types the clipboard's text into the host as keystrokes, since the host shares no
         /// clipboard with this client. Useful for passwords and commands. US layout, via
         /// <see cref="HostKeys"/>.</summary>
-        private void OnPasteToHost(object sender, RoutedEventArgs e)
+        private async void OnPasteToHost(object sender, RoutedEventArgs e)
         {
             if (_session == null) { FlashStatus("Not connected."); return; }
             string text = "";
@@ -1678,13 +1678,34 @@ namespace ATENtion.App
             {
                 FlashStatus("View-only session - keystrokes won't reach the host."); return;
             }
-            int n = 0;
-            foreach (var (hid, down) in HostKeys.TypeSequence(text))
+            var keys = HostKeys.TypeSequence(text).ToList();
+            int typed = keys.Count(k => k.down && k.hid != HostKeys.LShift);
+            int skipped = HostKeys.CountUntypable(text);
+            if (typed == 0) { FlashStatus("Nothing in the clipboard can be typed (US keyboard characters only)."); return; }
+            if (typed > PasteConfirmChars &&
+                MessageBox.Show(this, $"Type {typed:n0} characters into {PowerTarget(_ctx)}? This takes about " +
+                        $"{typed * PasteKeyGapMs / 1000 + 1} seconds.", "Paste to host",
+                        MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+                return;
+
+            // Typed at a steady pace off the UI thread. Sent all at once, a long paste arrived
+            // faster than the host's keyboard buffer drained and characters went missing. Stops if
+            // the tab reconnects or closes, rather than typing the rest into a new session.
+            var ctx = _ctx;
+            var session = _session;
+            FlashStatus($"Pasting {typed:n0} character(s)...");
+            await Task.Run(() =>
             {
-                _session.SendKey(hid, down);
-                if (down) n++;
-            }
-            FlashStatus($"Pasted {n} character(s) as keystrokes.");
+                foreach (var (hid, down) in keys)
+                {
+                    if (!ReferenceEquals(ctx.Session, session)) break;
+                    session.SendKey(hid, down);
+                    if (!down) Thread.Sleep(PasteKeyGapMs);
+                }
+            });
+            if (ReferenceEquals(ctx, _ctx))
+                FlashStatus($"Pasted {typed:n0} character(s)" +
+                            (skipped > 0 ? $"; skipped {skipped} that a US keyboard can't type." : "."));
         }
 
         /// <summary>Press the given HID usages in order, then release them in reverse - a key combo.</summary>
