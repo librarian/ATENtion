@@ -207,6 +207,93 @@ namespace ATENtion.App
             UpdateTitle();
         }
 
+        // ---- tab reordering ----
+
+        private SessionContext _dragTab;
+        private Point _dragOrigin;
+        private bool _draggingTab;
+
+        // The press is handled here rather than by the ListBox. On a click the ListBox captures the
+        // mouse and then selects every item the pointer crosses while the button is held, which would
+        // switch sessions as a tab is dragged past its neighbours.
+        private void OnTabPointerDown(object sender, MouseButtonEventArgs e)
+        {
+            ResetTabDrag();
+            var source = e.OriginalSource as DependencyObject;
+            if (FindAncestor<ButtonBase>(source) != null) return;     // close and "+" buttons
+            if (!(FindAncestor<ListBoxItem>(source)?.DataContext is SessionContext tab)) return;
+
+            SessionTabs.SelectedItem = tab;
+            _dragTab = tab;
+            _dragOrigin = e.GetPosition(SessionTabs);
+            e.Handled = true;
+        }
+
+        private void OnTabPointerMove(object sender, MouseEventArgs e)
+        {
+            if (_dragTab == null) return;
+            if (e.LeftButton != MouseButtonState.Pressed) { ResetTabDrag(); return; }
+
+            Point position = e.GetPosition(SessionTabs);
+            if (!_draggingTab)
+            {
+                if (Math.Abs(position.X - _dragOrigin.X) < SystemParameters.MinimumHorizontalDragDistance)
+                    return;
+                // Capture on the strip: a tab's own container can be regenerated when the collection
+                // moves, which would drop the capture mid-drag.
+                if (!TabStrip.CaptureMouse()) { ResetTabDrag(); return; }
+                _draggingTab = true;
+            }
+
+            int from = _sessions.IndexOf(_dragTab);
+            var midpoints = OtherTabMidpoints(from);
+            if (from < 0 || midpoints == null) return;
+
+            int to = TabReorder.TargetIndex(midpoints, position.X);
+            if (to == from) return;
+            _sessions.Move(from, to);
+            if (!ReferenceEquals(SessionTabs.SelectedItem, _dragTab)) SessionTabs.SelectedItem = _dragTab;
+            SessionTabs.UpdateLayout();
+        }
+
+        private void OnTabPointerUp(object sender, MouseButtonEventArgs e) => ResetTabDrag();
+
+        private void OnTabLostCapture(object sender, MouseEventArgs e) => ResetTabDrag();
+
+        private void ResetTabDrag()
+        {
+            bool release = _draggingTab;
+            _dragTab = null;
+            _draggingTab = false;
+            if (release && TabStrip.IsMouseCaptured) TabStrip.ReleaseMouseCapture();
+        }
+
+        // Midpoints of every tab except the one at skipIndex, in the ListBox's coordinates. Null if a
+        // container is not laid out yet.
+        private List<double> OtherTabMidpoints(int skipIndex)
+        {
+            var midpoints = new List<double>(_sessions.Count);
+            for (int i = 0; i < _sessions.Count; i++)
+            {
+                if (i == skipIndex) continue;
+                if (!(SessionTabs.ItemContainerGenerator.ContainerFromIndex(i) is FrameworkElement item) ||
+                    !item.IsVisible)
+                    return null;
+                Rect bounds = item.TransformToAncestor(SessionTabs).TransformBounds(new Rect(item.RenderSize));
+                midpoints.Add(bounds.Left + bounds.Width / 2);
+            }
+            return midpoints;
+        }
+
+        private static T FindAncestor<T>(DependencyObject node) where T : DependencyObject
+        {
+            while (node != null && !(node is T))
+                node = node is Visual || node is System.Windows.Media.Media3D.Visual3D
+                    ? VisualTreeHelper.GetParent(node)
+                    : LogicalTreeHelper.GetParent(node);
+            return node as T;
+        }
+
         private void OnCloseSessionTab(object sender, RoutedEventArgs e)
         {
             var ctx = (sender as FrameworkElement)?.Tag as SessionContext;
@@ -231,7 +318,7 @@ namespace ATENtion.App
                 else
                 {
                     int index = _sessions.IndexOf(ctx);
-                    next = _sessions[index + 1 < _sessions.Count ? index + 1 : index - 1];
+                    next = _sessions[TabReorder.NeighbourAfterClose(index, _sessions.Count)];
                 }
                 SwitchTo(next);
             }

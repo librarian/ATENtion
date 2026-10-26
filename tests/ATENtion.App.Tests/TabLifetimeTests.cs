@@ -57,6 +57,18 @@ namespace ATENtion.App.Tests
             Assert.False(attempts.Begin().IsCancellationRequested);
         }
 
+        [Theory]
+        [InlineData(0, 3, 1)]   // first of three: the one to its right
+        [InlineData(1, 3, 2)]
+        [InlineData(2, 3, 1)]   // last: the one to its left
+        [InlineData(0, 2, 1)]
+        [InlineData(1, 2, 0)]
+        public void Closing_The_Visible_Tab_Shows_A_Neighbour(int closing, int count, int expected)
+        {
+            int next = TabReorder.NeighbourAfterClose(closing, count);
+            Assert.Equal(expected, next);
+            Assert.NotEqual(closing, next);
+        }
 
 
 
