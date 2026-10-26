@@ -96,7 +96,26 @@
                      the BMC only re-encodes the console for a full request; an incremental one is
                      answered from cache, so this is what actually governs the update rate.
                      Continuous asks every time, which is the only setting that gives real motion. -->
-
+                <MenuItem x:Name="FullFrameRequestsItem" Header="Full frame _requests">
+                    <MenuItem x:Name="RefreshContinuousItem"
+                            Header="_Continuous - most responsive, highest bandwidth"
+                            IsCheckable="True" Tag="-1" Click="OnFullRefreshInterval"
+                            ToolTip="Ask for a full frame every time, so the picture is always freshly encoded. Measured on an ASPEED board driving the console with real key presses: the result of a keystroke appeared in about 505ms, against about 1090ms at the 1-second setting, because there the screen only updates when the once-a-second full frame fires. Costs roughly 7 Mbps at 1024x768 against 6 Mbps."/>
+                    <MenuItem x:Name="Refresh1Item" Header="Every _1 second"
+                            IsCheckable="True" Tag="1" Click="OnFullRefreshInterval"/>
+                    <MenuItem x:Name="Refresh2Item" Header="Every _2 seconds"
+                            IsCheckable="True" Tag="2" Click="OnFullRefreshInterval"/>
+                    <MenuItem x:Name="Refresh3Item" Header="Every _3 seconds"
+                            IsCheckable="True" Tag="3" Click="OnFullRefreshInterval"/>
+                    <MenuItem x:Name="Refresh5Item" Header="Every _5 seconds - default, lowest bandwidth"
+                            IsCheckable="True" Tag="5" Click="OnFullRefreshInterval"/>
+                    <MenuItem x:Name="Refresh10Item" Header="Every 1_0 seconds"
+                            IsCheckable="True" Tag="10" Click="OnFullRefreshInterval"/>
+                    <Separator/>
+                    <MenuItem x:Name="RefreshOffItem" Header="O_ff - incremental only"
+                            IsCheckable="True" Tag="0" Click="OnFullRefreshInterval"
+                            ToolTip="Send only incremental requests. Most ATEN/ASPEED firmware answers those from cache, so on such a BMC the screen stops updating until you reconnect or use View &#x2023; Refresh Screen."/>
+                </MenuItem>
                 <MenuItem x:Name="StreamAllTabsItem"
                         Header="Keep _background tabs streaming"
                         IsCheckable="True"

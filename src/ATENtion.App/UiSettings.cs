@@ -42,6 +42,7 @@ namespace ATENtion.App
         /// <summary>The BMC pointer mode: 1 = Absolute, 2 = Relative (NORMAL), 3 = Single. See <see cref="MouseMode"/>.</summary>
         public int MouseMode = 1;
         /// <summary>Seconds between full frame requests; 0 sends incremental requests only, -1 asks every frame.</summary>
+        public int FullFrameIntervalSeconds = 5;
         /// <summary>ATEN chroma mode: 444 Enhanced Text (default) or 422 Normal.</summary>
         /// <summary>ATEN image quality level, 0 through 11 (default 11).</summary>
         /// <summary>True to let tabs that are not visible keep requesting video.</summary>
@@ -72,6 +73,7 @@ namespace ATENtion.App
                 AutoReconnect = st.AutoReconnect,
                 EnableLogging = st.EnableLogging,
                 MouseMode = st.MouseMode,
+                FullFrameIntervalSeconds = st.FullFrameIntervalSeconds,
                 StreamAllTabs = st.StreamAllTabs,
                 ReopenTabs = st.ReopenTabs,
                 OpenProfileIds = new System.Collections.Generic.List<string>(st.OpenProfileIds),
@@ -94,6 +96,7 @@ namespace ATENtion.App
             st.AutoReconnect = AutoReconnect;
             st.EnableLogging = EnableLogging;
             st.MouseMode = MouseMode;
+            st.FullFrameIntervalSeconds = FullFrameIntervalSeconds;
             st.StreamAllTabs = StreamAllTabs;
             st.ReopenTabs = ReopenTabs;
             st.OpenProfileIds.Clear();
