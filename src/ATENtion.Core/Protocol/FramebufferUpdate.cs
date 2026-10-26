@@ -24,6 +24,16 @@ namespace ATENtion.Core.Protocol
         public uint Mode;
         /// <summary>The ATEN codec packet for this rectangle (it begins with the ten-byte codec header).</summary>
         public byte[] Payload;
+
+        /// <summary>
+        /// True when this rectangle is the BMC's "no video signal" marker rather than picture.
+        /// </summary>
+        /// <remarks>
+        /// A powered-down host makes the BMC answer with an empty rectangle of negative size,
+        /// -640 x -480, arriving as the unsigned values 64896 and 65056.
+        /// </remarks>
+        public bool IsNoSignal => Payload != null && Payload.Length == 0 &&
+                                  (Width >= 0x8000 || Height >= 0x8000);
     }
 
     /// <summary>
@@ -87,8 +97,11 @@ namespace ATENtion.Core.Protocol
                     Mode = stream.ReadU32BE(),
                 };
                 uint dataLen = stream.ReadU32BE();
-                Diagnostics.KvmLog.Write(
-                    $"  rect[{i}] ({r.X},{r.Y} {r.Width}x{r.Height}) enc=0x{r.Encoding:x8} mode=0x{r.Mode:x8} dataLen={dataLen}");
+                // Only data-less rectangles (the no-signal marker, heartbeats) are logged. Picture
+                // rectangles arrive many times a second and would swamp the log.
+                if (dataLen == 0)
+                    Diagnostics.KvmLog.Write(
+                        $"  rect[{i}] ({r.X},{r.Y} {r.Width}x{r.Height}) enc=0x{r.Encoding:x8} mode=0x{r.Mode:x8} dataLen=0");
                 r.Payload = dataLen == 0 ? new byte[0] : stream.ReadExact((int)dataLen);
                 u.Rects.Add(r);
             }
