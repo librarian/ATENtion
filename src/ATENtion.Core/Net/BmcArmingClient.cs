@@ -74,6 +74,8 @@ namespace ATENtion.Core.Net
         /// <summary>The full ordered list of JNLP arguments, retained for diagnostics.</summary>
         public System.Collections.Generic.List<string> Arguments { get; set; }
 
+        // The web session that issued these credentials, kept so it can be closed afterwards.
+
         /// <summary>
         /// The port to connect to, mirroring the original: the server TLS port (argument 9) when
         /// stunnel TLS is enabled, otherwise the plaintext iKVM port (argument 4), falling back to
@@ -141,9 +143,7 @@ namespace ATENtion.Core.Net
         /// firmware that needs the Redfish session path.</exception>
         public ArmingResult Arm(string host, string username, string password, bool useHttps = true, int webPort = 0)
         {
-            string scheme = useHttps ? "https" : "http";
-            int port = webPort != 0 ? webPort : (useHttps ? 443 : 80);
-            string baseUrl = $"{scheme}://{host}:{port}";
+            string baseUrl = WebBaseUrl(host, useHttps, webPort);
             var cookies = new CookieContainer();
 
             // Trust the BMC's self-signed web certificate (the equivalent of IPMIView's TrustAllManager).
@@ -204,6 +204,23 @@ namespace ATENtion.Core.Net
             }
         }
 
+        /// <summary>The BMC's web root. An IPv6 literal is bracketed, as a URL requires.</summary>
+        internal static string WebBaseUrl(string host, bool useHttps, int webPort)
+        {
+            string scheme = useHttps ? "https" : "http";
+            int port = webPort != 0 ? webPort : (useHttps ? 443 : 80);
+            string authority = host.IndexOf(':') >= 0 && !host.StartsWith("[", StringComparison.Ordinal)
+                ? "[" + host + "]" : host;
+            return $"{scheme}://{authority}:{port}";
+        }
+
+        /// <summary>Closes the web session that issued <paramref name="result"/>. Best effort.</summary>
+        /// <remarks>
+        /// Call this when the console it armed has ended. The BMC ties the console to this web
+        /// session: before the handshake a logout makes it refuse the credentials, and afterwards it
+        /// sends the console a "web logout" notice and drops it from the session list, which the
+        /// vendor viewer answers by closing. A mounted disc is unaffected.
+        /// </remarks>
         // Scrapes the CSRF token from the top menu and posts op.cgi to set ikvm_setting=0 (the Java
         // plug-in). Best-effort: failures are logged and ignored, since some firmware needs no switch.
         private void TrySwitchToJavaInterface(string baseUrl, CookieContainer cookies)
