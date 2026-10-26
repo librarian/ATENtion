@@ -258,6 +258,19 @@ namespace ATENtion.Core.Net
         /// <summary>The server's privilege/session string (<c>&lt;sid&gt; ROLE &lt;clientip&gt;</c>).</summary>
         public string PrivilegeInfo { get; private set; }
 
+        /// <summary>
+        /// Every console session the BMC currently reports, as <c>&lt;sid&gt; &lt;user&gt; &lt;client ip&gt;</c>.
+        /// </summary>
+        /// <remarks>
+        /// The BMC answers with one privilege record per active session, indexed downwards, so a burst
+        /// of records beginning at the session count and ending at 1 is one complete list. The list is
+        /// replaced only when a burst completes, so a reader never sees a half-built one.
+        /// </remarks>
+        public System.Collections.Generic.IReadOnlyList<string> Sessions { get; private set; } =
+            new string[0];
+
+        private readonly SessionListBuilder _sessionList = new SessionListBuilder();
+
         public KvmVideoSession(KvmConnectionOptions options, IRfbAuthenticator authenticator = null)
         {
             _connection = new KvmConnection(options);
@@ -398,6 +411,41 @@ namespace ATENtion.Core.Net
             }
             while (System.Threading.Interlocked.CompareExchange(ref _outstanding, seen - 1, seen) != seen);
         }
+
+        // A privilege record (0x39). The BMC sends one per console session as a burst; each is
+        // processed even when it repeats the previous one, or a user leaving would go unnoticed.
+        private void HandlePrivilege(ServerMessageResult msg)
+        {
+            var type = (PrivilegeRecordType)msg.PrivilegeType;
+            bool changed = Controlling != msg.Controlling;
+            Controlling = msg.Controlling;
+            // Only session records describe a session; the others carry a message in the text field.
+            if (type == PrivilegeRecordType.SessionPresent && PrivilegeInfo != msg.PrivilegeInfo)
+            {
+                PrivilegeInfo = msg.PrivilegeInfo;
+                changed = true;
+            }
+            if (_sessionList.Add(msg.PrivilegeIndex, msg.PrivilegeType, msg.PrivilegeInfo, out var list))
+            {
+                Sessions = list;
+                changed = true;
+            }
+            if (type != PrivilegeRecordType.SessionPresent && type != PrivilegeRecordType.SessionEnded &&
+                type != PrivilegeRecordType.KeyboardLights)
+            {
+                // A notice about this console rather than a session. The vendor viewer closes on a
+                // web logout; this BMC does not enforce it, so it is reported and the session kept,
+                // as this client always has.
+                Diagnostics.KvmLog.Write($"BMC notice: {type} ({msg.PrivilegeInfo})");
+                LastNotice = type;
+                changed = true;
+            }
+            if (changed) PrivilegeChanged?.Invoke(this, EventArgs.Empty);
+        }
+
+        /// <summary>The latest notice the BMC sent about this console, such as a session limit or an upgrade.</summary>
+        /// <remarks>Null until one arrives. Raised through <see cref="PrivilegeChanged"/>.</remarks>
+        public PrivilegeRecordType? LastNotice { get; private set; }
 
         /// <summary>Watchdog body (off the timer thread): probe after a soft stall, fault after a hard one.</summary>
         private void WatchdogTick()
@@ -563,12 +611,7 @@ namespace ATENtion.Core.Net
                     // a powered-down host counted as outstanding, which stalled the stream once it
                     // came back on.
                     if (msg.Type == RfbMessageType.FramebufferUpdate) ReleaseOneRequest();
-                    if (msg.HasPrivilege && (Controlling != msg.Controlling || PrivilegeInfo != msg.PrivilegeInfo))
-                    {
-                        Controlling = msg.Controlling;
-                        PrivilegeInfo = msg.PrivilegeInfo;
-                        PrivilegeChanged?.Invoke(this, EventArgs.Empty);
-                    }
+                    if (msg.HasPrivilege) HandlePrivilege(msg);
                     if (msg.HasHostStatus)
                     {
                         HostPower = msg.HostPowered ? HostPowerState.On : HostPowerState.Off;

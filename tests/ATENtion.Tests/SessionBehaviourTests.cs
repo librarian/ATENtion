@@ -46,6 +46,37 @@ namespace ATENtion.Tests
             }
         }
 
+        [Fact]
+        public void User_List_Follows_Joins_And_Leaves()
+        {
+            // The record sequence an X10 board sent (addresses changed): the list on connect, a
+            // web-logout notice, a full resend when someone joined, and one record when they left.
+            using (var bmc = new FakeBmc())
+            using (var session = Open(bmc))
+            {
+                WaitFor(() => bmc.Requests > 0);
+                bmc.Push(FakeBmc.Privilege(3, 1, "562 ADMIN 10.0.0.46"), FakeBmc.Privilege(2, 1, "328 ADMIN 10.0.0.46"),
+                         FakeBmc.Privilege(1, 1, "252 ADMIN 10.0.0.92"));
+                Assert.True(WaitFor(() => session.Sessions.Count == 3));
+
+                bmc.Push(FakeBmc.Privilege(1, 3, "Kill Sesssion Due to Web Logout"));
+                Assert.True(WaitFor(() => session.LastNotice == PrivilegeRecordType.WebLogout));
+                Assert.Equal(3, session.Sessions.Count);   // a notice, not a session
+
+                bmc.Push(FakeBmc.Privilege(4, 1, "562 ADMIN 10.0.0.46"), FakeBmc.Privilege(3, 1, "328 ADMIN 10.0.0.46"),
+                         FakeBmc.Privilege(2, 1, "252 ADMIN 10.0.0.92"), FakeBmc.Privilege(1, 1, "709 ADMIN 10.0.0.92"),
+                         // then the newcomer again, twice, on its own
+                         FakeBmc.Privilege(1, 1, "709 ADMIN 10.0.0.92"), FakeBmc.Privilege(1, 1, "709 ADMIN 10.0.0.92"));
+                Thread.Sleep(300);
+                Assert.True(WaitFor(() => session.Sessions.Count == 4),
+                    "list after a join: " + string.Join(" | ", session.Sessions));
+
+                bmc.Push(FakeBmc.Privilege(1, 2, "709 ADMIN 10.0.0.92"));
+                Assert.True(WaitFor(() => session.Sessions.Count == 3),
+                    "list after a leave: " + string.Join(" | ", session.Sessions));
+                Assert.DoesNotContain(session.Sessions, e => e.StartsWith("709 "));
+            }
+        }
 
         [Fact]
         public void A_Silent_BMC_Fails_The_Handshake_Instead_Of_Hanging()
@@ -135,6 +166,65 @@ namespace ATENtion.Tests
     }
 
     /// <summary>The privilege-record list logic on its own.</summary>
+    public class SessionListBuilderTests
+    {
+        private const uint Present = 1, Ended = 2, Logout = 3;
+
+        [Fact]
+        public void A_Burst_Completes_At_Index_One()
+        {
+            var b = new SessionListBuilder();
+            Assert.False(b.Add(2, Present, "1 a x", out _));
+            Assert.True(b.Add(1, Present, "2 b y", out var list));
+            Assert.Equal(new[] { "1 a x", "2 b y" }, list);
+        }
+
+        [Fact]
+        public void An_Ended_Record_Removes_That_Session()
+        {
+            var b = new SessionListBuilder();
+            b.Add(2, Present, "1 a x", out _);
+            b.Add(1, Present, "2 b y", out _);
+            Assert.True(b.Add(1, Ended, "2 b y", out var list));
+            Assert.Equal(new[] { "1 a x" }, list);
+        }
+
+        [Fact]
+        public void Notices_Leave_The_List_Alone()
+        {
+            var b = new SessionListBuilder();
+            b.Add(1, Present, "1 a x", out _);
+            Assert.False(b.Add(1, Logout, "Kill Sesssion Due to Web Logout", out _));
+            Assert.False(b.Add(1, 7, "", out _));
+        }
+
+        [Fact]
+        public void A_Lone_Record_Updates_One_Entry_Rather_Than_Replacing_The_List()
+        {
+            var b = new SessionListBuilder();
+            b.Add(2, Present, "1 a x", out _);
+            b.Add(1, Present, "2 b y", out _);
+            Assert.False(b.Add(1, Present, "2 b y", out _));          // the repeat of a newcomer
+            Assert.True(b.Add(1, Present, "3 c z", out var list));    // a session not yet listed
+            Assert.Equal(new[] { "1 a x", "2 b y", "3 c z" }, list);
+        }
+
+        [Fact]
+        public void An_Unchanged_Resend_Is_Not_A_Change()
+        {
+            var b = new SessionListBuilder();
+            b.Add(1, Present, "1 a x", out _);
+            Assert.False(b.Add(1, Present, "1 a x", out _));
+        }
+
+        [Fact]
+        public void Ending_An_Unknown_Session_Is_Not_A_Change()
+        {
+            var b = new SessionListBuilder();
+            b.Add(1, Present, "1 a x", out _);
+            Assert.False(b.Add(1, Ended, "9 z z", out _));
+        }
+    }
 
     public class ArmingUrlTests
     {

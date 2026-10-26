@@ -49,6 +49,11 @@ namespace ATENtion.Core.Protocol
         /// string, of the form <c>&lt;sid&gt; ROLE &lt;clientip&gt;</c>.
         /// </summary>
         public string PrivilegeInfo;
+        /// <summary>The privilege record's index. The BMC sends one record per active session,
+        /// counting down, so the first of a burst carries the session count and the last is 1.</summary>
+        public uint PrivilegeIndex;
+        /// <summary>The kind of privilege record; see <see cref="Net.PrivilegeRecordType"/>.</summary>
+        public uint PrivilegeType;
         /// <summary>True for a host-status reply (0x37).</summary>
         public bool HasHostStatus;
         /// <summary>Whether the host is powered on, from a host-status reply.</summary>
@@ -222,6 +227,8 @@ namespace ATENtion.Core.Protocol
                         result.HasPrivilege = true;
                         result.Controlling = !(a == 1 && b == 4);
                         result.PrivilegeInfo = text.Trim();
+                        result.PrivilegeIndex = a;
+                        result.PrivilegeType = b;
                         ATENtion.Core.Diagnostics.KvmLog.Write(
                             $"  privilege 0x39: a={a} b={b} controlling={result.Controlling} info=\"{result.PrivilegeInfo}\"");
                         break;

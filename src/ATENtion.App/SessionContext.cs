@@ -46,6 +46,15 @@ namespace ATENtion.App
         public VirtualMediaSession Vmedia;
         public EventHandler<Exception> VmFaulted;
         public EventHandler VmClosed;
+        // The session whose console-session list KnownSessions came from, and that list; null until
+        // the first list arrives. Used to announce users joining and leaving.
+        internal KvmVideoSession SessionListOwner;
+        internal IReadOnlyList<string> KnownSessions;
+
+        // The BMC notice last reported for NoticeOwner, so each is shown once.
+        internal KvmVideoSession NoticeOwner;
+        internal PrivilegeRecordType? ShownNotice;
+
         /// <summary>True while an ISO is attaching in the background.</summary>
         public bool Mounting;
         /// <summary>Moves on whenever media is cleared, so a mount that finishes afterwards is dropped.</summary>
