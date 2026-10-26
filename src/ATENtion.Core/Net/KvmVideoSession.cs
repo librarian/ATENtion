@@ -112,13 +112,18 @@ namespace ATENtion.Core.Net
         /// 0 disables.</summary>
         public int FullRefreshIntervalTicks { get; set; } = 5;
 
-        /// <summary>Optional floor (ms) between incremental frame requests (video FPS cap). The earlier
-        /// 80ms cap was only needed while the keyframe storm saturated the BMC and
-        /// starved input. With the storm gone, incrementals are small and the BMC is request-response
-        /// limited (~its natural rate, like the original's tight loop), so it runs uncapped (0). Raise
-        /// this only if heavy on-screen activity is seen to lag input again.</summary>
+        /// <summary>Shortest time between frame requests, in milliseconds; 0 for no limit.</summary>
+        /// <remarks>
+        /// Uncapped, the request/response loop runs as fast as the round trip allows: about 200
+        /// replies a second on an X10 board even with nothing changing, each one work for the BMC's
+        /// processor and for this client. The vendor viewer has the same cap as an option (off by
+        /// default, 10 fps when on). A request that is due sooner is deferred on a timer, never by
+        /// making the receive pump wait.
+        /// </remarks>
         public int MinFrameIntervalMs { get; set; } = 0;
         private int _lastRequestTick;
+        private Timer _paceTimer;
+        private int _pacePending;   // 0/1: a deferred request is scheduled
 
         /// <summary>How many FramebufferUpdateRequests to keep in flight. ASPEED delta frames must be
         /// requested and applied in strict request/response order: allowing two outstanding requests
@@ -302,6 +307,7 @@ namespace ATENtion.Core.Net
             if (Decoder == null) throw new InvalidOperationException("Call Open() first.");
             _running = true;
             LastMessageUtc = DateTime.UtcNow; // arm the stall watchdog from connect, not from epoch
+            _paceTimer = new Timer(_ => OnPaceTimer(), null, Timeout.Infinite, Timeout.Infinite);
             _pumpThread = new Thread(PumpLoop) { IsBackground = true, Name = "iKVM-receive" };
             _pumpThread.Start();
             StartInputSender();
@@ -395,8 +401,22 @@ namespace ATENtion.Core.Net
             while (_running && !_videoPaused &&
                    System.Threading.Volatile.Read(ref _outstanding) < EffectivePipelineDepth)
             {
+                int wait = MinFrameIntervalMs - unchecked(Environment.TickCount - _lastRequestTick);
+                if (MinFrameIntervalMs > 0 && wait > 0)
+                {
+                    if (System.Threading.Interlocked.Exchange(ref _pacePending, 1) == 0)
+                        _paceTimer?.Change(wait, Timeout.Infinite);
+                    return;
+                }
                 SendUpdate(incremental: true);
             }
+        }
+
+        private void OnPaceTimer()
+        {
+            System.Threading.Interlocked.Exchange(ref _pacePending, 0);
+            try { TopUp(); }
+            catch (Exception ex) { OnSendFault(ex); }
         }
 
         // One FramebufferUpdate arrived: one request is no longer in flight. Never below zero, since
@@ -966,6 +986,8 @@ namespace ATENtion.Core.Net
             _keepAliveTimer = null;
             try { _watchdogTimer?.Dispose(); } catch { }
             _watchdogTimer = null;
+            try { _paceTimer?.Dispose(); } catch { }
+            _paceTimer = null;
         }
 
         public void Dispose()

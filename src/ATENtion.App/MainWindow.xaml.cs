@@ -192,6 +192,7 @@ namespace ATENtion.App
         private void ApplyStreaming(SessionContext ctx, KvmVideoSession session)
         {
             session.PausedCheckSeconds = HiddenTabCheckSeconds;
+            session.MinFrameIntervalMs = _frameRateLimit > 0 ? 1000 / _frameRateLimit : 0;
             session.VideoPaused = !StreamAllTabsItem.IsChecked && !ReferenceEquals(ctx, _ctx);
         }
 
@@ -201,6 +202,34 @@ namespace ATENtion.App
         /// glyph stays current and a dropped link is noticed.
         /// </remarks>
         private const int HiddenTabCheckSeconds = 10;
+
+        // ---- frame rate limit ----
+
+        /// <summary>Most frames a second a tab asks for; 0 for no limit.</summary>
+        private int _frameRateLimit;
+
+        private IEnumerable<KeyValuePair<int, MenuItem>> FrameRateItems()
+        {
+            yield return new KeyValuePair<int, MenuItem>(0, FpsUnlimitedItem);
+            yield return new KeyValuePair<int, MenuItem>(60, Fps60Item);
+            yield return new KeyValuePair<int, MenuItem>(30, Fps30Item);
+            yield return new KeyValuePair<int, MenuItem>(10, Fps10Item);
+        }
+
+        private void OnFrameRateLimit(object sender, RoutedEventArgs e)
+        {
+            if (!(sender is MenuItem item) || !int.TryParse(item.Tag as string, out int fps)) return;
+            _frameRateLimit = fps;
+            SyncFrameRateMenu();
+            ApplyTabStreaming();
+            FlashStatus(fps > 0 ? $"Frame rate limited to {fps} fps." : "Frame rate: unlimited.");
+        }
+
+        private void SyncFrameRateMenu()
+        {
+            foreach (var entry in FrameRateItems())
+                entry.Value.IsChecked = entry.Key == _frameRateLimit;
+        }
 
         /// <summary>Replays the newly selected session's state into the window's shared controls.</summary>
         private void ActivateContext()
@@ -377,6 +406,8 @@ namespace ATENtion.App
                 ? ScreenInfoRequest.MaximumQuality : (byte)s.ImageQuality;
             ApplyDisplayPreference();
             StreamAllTabsItem.IsChecked = s.StreamAllTabs;
+            _frameRateLimit = FrameRateItems().Any(i => i.Key == s.FrameRateLimit) ? s.FrameRateLimit : 0;
+            SyncFrameRateMenu();
             ApplyTabStreaming();
             OnToggleLog(null, null);
             OnFitModeChanged(null, null);
@@ -421,6 +452,7 @@ namespace ATENtion.App
                 ImageMode = _imageMode,
                 ImageQuality = _imageQuality,
                 StreamAllTabs = StreamAllTabsItem.IsChecked,
+                FrameRateLimit = _frameRateLimit,
                 ReopenTabs = ReopenTabsItem.IsChecked,
                 OpenProfileIds = _sessions
                     .Select(c => c.ConnectProfile?.Id)
