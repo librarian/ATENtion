@@ -46,6 +46,7 @@ namespace ATENtion.App
         public bool AutoReconnect = true;
         public bool EnableLogging;
         public int MouseMode = 1;
+        public bool StreamAllTabs;
         public string LastProfileId = "";
         public readonly List<StoredConnectionProfile> Profiles = new List<StoredConnectionProfile>();
 
@@ -89,6 +90,7 @@ namespace ATENtion.App
                     new XAttribute("smoothScaling", SmoothScaling),
                     new XAttribute("autoReconnect", AutoReconnect),
                     new XAttribute("enableLogging", EnableLogging),
+                    new XAttribute("streamAllTabs", StreamAllTabs),
                     new XAttribute("mouseMode", MouseMode));
 
                 var profiles = new XElement("Connections",
@@ -149,6 +151,7 @@ namespace ATENtion.App
                     result.AutoReconnect = Bool(ui, "autoReconnect", true);
                     result.EnableLogging = Bool(ui, "enableLogging");
                     result.MouseMode = Int(ui, "mouseMode", 1);
+                    result.StreamAllTabs = Bool(ui, "streamAllTabs");
                 }
 
                 var connections = root.Element("Connections");

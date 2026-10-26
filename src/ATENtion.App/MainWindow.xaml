@@ -91,8 +91,31 @@
                         IsCheckable="True"
                         Checked="OnToggleSmoothScaling"
                         Unchecked="OnToggleSmoothScaling"/>
+                <Separator/>
+                <!-- How often to ask for a full, non-incremental frame. On ATEN/ASPEED firmware
+                     the BMC only re-encodes the console for a full request; an incremental one is
+                     answered from cache, so this is what actually governs the update rate.
+                     Continuous asks every time, which is the only setting that gives real motion. -->
+
+                <MenuItem x:Name="StreamAllTabsItem"
+                        Header="Keep _background tabs streaming"
+                        IsCheckable="True"
+                        Click="OnToggleStreamAllTabs"
+                        ToolTip="Off (default): only the visible tab streams video; hidden tabs check in with the BMC every 10 seconds. On: every connected tab keeps streaming, which is useful for watching one machine boot while working on another - but each tab costs its own bandwidth, up to about 5 Mbps with Full frame requests set to Continuous."/>
+                <!-- The visible tab asks for the next frame as soon as the last arrives, which on a
+                     still screen is mostly replies saying nothing changed. A limit spaces requests
+                     out. The vendor viewer has the same option, off by default. -->
+
+                <!-- The vendor viewer's "Display Preference": chroma/compression mode plus an image
+                     quality level. Both are sent with changeScreenInfo (0x32) and take effect on the
+                     running session. -->
+
             </MenuItem>
             <MenuItem Header="_Connection">
+                <MenuItem Header="_New Session Tab…"
+                        Click="OnNewSessionTab"
+                        ToolTip="Open another server in a new tab in this window"/>
+                <Separator/>
                 <MenuItem Header="_Connect / Change server…"
                         Click="OnConnectOrChange"/>
                 <MenuItem Header="_Reconnect current"
@@ -103,7 +126,9 @@
                         Header="_Auto-reconnect on drop"
                         IsCheckable="True"
                         IsChecked="True"/>
+
                 <Separator/>
+
                 <MenuItem Header="Session _Info…"
                         Click="OnSessionInfo"/>
             </MenuItem>
@@ -126,6 +151,9 @@
                         Click="OnClearLog"/>
             </MenuItem>
             <MenuItem Header="_Storage">
+                <!-- Filled in when the menu opens, from the BMC's virtual-media slots. -->
+
+                <Separator/>
                 <MenuItem x:Name="MountIsoItem"
                         Header="_Mount ISO…"
                         Click="OnMountIso"/>
@@ -173,6 +201,60 @@
                  VerticalScrollBarVisibility="Auto"
                 HorizontalScrollBarVisibility="Auto"
                  TextWrapping="NoWrap"/>
+        <!-- One row per open session. The video surface below is shared: selecting a tab swaps which
+             session's framebuffer is painted into it. Background sessions keep running. Tabs are
+             reordered by dragging; the strip, not the ListBox, handles the pointer for that. -->
+        <Border x:Name="TabStrip"
+                DockPanel.Dock="Top"
+                MinHeight="30"
+                Background="#252526"
+                BorderBrush="#3A3A3A"
+                BorderThickness="0,0,0,1">
+            <DockPanel>
+                <Button DockPanel.Dock="Right"
+                        Content="+"
+                        Width="24"
+                        Margin="3"
+                        Padding="0"
+                        FontWeight="Bold"
+                        ToolTip="Open another server in a new tab"
+                        Click="OnNewSessionTab"/>
+                <ListBox x:Name="SessionTabs"
+                         Background="Transparent"
+                         BorderThickness="0"
+                         Foreground="#DDD"
+                         SelectionChanged="OnSessionTabChanged"
+                         ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                         ScrollViewer.VerticalScrollBarVisibility="Disabled">
+                    <ListBox.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Orientation="Horizontal"/>
+                        </ItemsPanelTemplate>
+                    </ListBox.ItemsPanel>
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel Orientation="Horizontal" Margin="7,3">
+
+                                <TextBlock Text="{Binding TabState}"
+                                           Foreground="#7FBF9F"
+                                           Margin="0,0,6,0"/>
+                                <TextBlock Text="{Binding DisplayName}"
+                                           ToolTip="{Binding TabTip}"/>
+                                <Button Content="&#x2715;"
+                                        Margin="9,0,0,0"
+                                        Padding="3,0"
+                                        BorderThickness="0"
+                                        Background="Transparent"
+                                        Foreground="#999"
+                                        Tag="{Binding}"
+                                        ToolTip="Close this session"
+                                        Click="OnCloseSessionTab"/>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </DockPanel>
+        </Border>
         <Border Background="Black"
                 Padding="8"
                 AllowDrop="True"
