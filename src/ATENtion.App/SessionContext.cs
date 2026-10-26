@@ -105,6 +105,51 @@ namespace ATENtion.App
         // Throughput bookkeeping for the status line.
         public long LastFrames, LastBytes, LastFps, LastRateBytes;
 
+        private bool _powerOn;
+        private string _powerTip = PowerStatus.Tip(VideoSignalState.Unknown, null);
+
+        /// <summary>Host state as far as the video signal reveals it.</summary>
+        public bool PowerOn => _powerOn;
+
+        /// <summary>Sets the glyph's state and how long ago it was confirmed.</summary>
+        /// <param name="checkedAgo">Null while the tab streams; the age of the last check while paused.</param>
+        public void UpdatePower(HostPowerState power, VideoSignalState signal, TimeSpan? checkedAgo)
+        {
+            bool on = PowerStatus.IsOn(power, signal);
+            if (_powerOn != on)
+            {
+                _powerOn = on;
+                Raise(nameof(PowerOn));
+                Raise(nameof(PowerBrush));
+            }
+            string tip = PowerStatus.Tip(power, signal, checkedAgo);
+            if (tip != _powerTip)
+            {
+                _powerTip = tip;
+                Raise(nameof(PowerTip));
+            }
+        }
+
+        /// <summary>Green when the host is definitely on, grey otherwise.</summary>
+        /// <remarks>
+        /// Two colours, not three: only "on" is certain. No picture is usually a powered-down host
+        /// but equally matches one running without video output, so red would overstate it.
+        /// </remarks>
+        public Brush PowerBrush =>
+            _powerOn ? StatusColors.Controlling : PowerUnknownBrush;
+
+        public string PowerTip => _powerTip;
+
+        // Lifted off the tab strip's #252526 so it reads as "no picture", not a missing glyph.
+        private static readonly Brush PowerUnknownBrush = MakeFrozen(0x55, 0x55, 0x55);
+
+        private static Brush MakeFrozen(byte r, byte g, byte b)
+        {
+            var brush = new SolidColorBrush(Color.FromRgb(r, g, b));
+            brush.Freeze();   // shared across threads and tabs
+            return brush;
+        }
+
         private string _displayName = "New session";
 
         /// <summary>The tab caption: the host name, or a placeholder before the first connect.</summary>

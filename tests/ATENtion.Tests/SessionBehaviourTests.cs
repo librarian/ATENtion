@@ -153,6 +153,89 @@ namespace ATENtion.Tests
 namespace ATENtion.Tests
 {
     /// <summary>Host power from the BMC's status reply, and the checks that use it.</summary>
+    public class HostStatusTests
+    {
+        [Fact]
+        public void Power_Comes_From_The_Status_Reply_Even_Without_A_Picture()
+        {
+            // On, but no video: the case the video signal alone cannot tell from off.
+            using (var bmc = new FakeBmc { HostStatusPower = 1 })
+            using (var session = Open(bmc))
+            {
+                Assert.True(Wait(() => session.HostPower == HostPowerState.On));
+                Assert.True(Wait(() => session.VideoSignal == VideoSignalState.Absent));
+                Assert.True(session.HostStatusSupported);
+            }
+        }
+
+        [Fact]
+        public void A_Powered_Off_Host_Reads_As_Off()
+        {
+            using (var bmc = new FakeBmc { HostStatusPower = 0 })
+            using (var session = Open(bmc))
+                Assert.True(Wait(() => session.HostPower == HostPowerState.Off));
+        }
+
+        [Fact]
+        public void A_Hidden_Tab_Checks_With_The_Status_Query_When_The_BMC_Answers_It()
+        {
+            using (var bmc = new FakeBmc())
+            using (var session = Open(bmc, s => { s.VideoPaused = true; s.PausedCheckSeconds = 1; }))
+            {
+                Assert.True(Wait(() => session.HostStatusSupported));
+                int fullAfterStart = bmc.FullRequests, statusAfterStart = bmc.StatusQueries;
+                Thread.Sleep(3500);
+                Assert.Equal(fullAfterStart, bmc.FullRequests);
+                Assert.True(bmc.StatusQueries >= statusAfterStart + 2, $"{bmc.StatusQueries - statusAfterStart} status checks");
+            }
+        }
+
+        [Fact]
+        public void A_Hidden_Tab_Falls_Back_To_Full_Frames_When_Status_Goes_Unanswered()
+        {
+            using (var bmc = new FakeBmc { HostStatusPower = -1 })
+            using (var session = Open(bmc, s => { s.VideoPaused = true; s.PausedCheckSeconds = 1; }))
+            {
+                Assert.True(Wait(() => bmc.FullRequests >= 1));
+                Thread.Sleep(300);
+                int fullAfterStart = bmc.FullRequests;
+                Thread.Sleep(3500);
+                Assert.False(session.HostStatusSupported);
+                Assert.True(bmc.FullRequests >= fullAfterStart + 2, $"{bmc.FullRequests - fullAfterStart} full checks");
+            }
+        }
+
+        [Fact]
+        public void A_Visible_Tab_Keeps_Asking_For_Status()
+        {
+            using (var bmc = new FakeBmc())
+            using (var session = Open(bmc, s => s.HostStatusSeconds = 1))
+            {
+                Assert.True(Wait(() => bmc.StatusQueries >= 3, 5000), $"{bmc.StatusQueries} queries");
+            }
+        }
+
+
+        private static KvmVideoSession Open(FakeBmc bmc, Action<KvmVideoSession> configure = null)
+        {
+            var session = new KvmVideoSession(bmc.Options()) { LogInput = false };
+            configure?.Invoke(session);
+            session.Open();
+            session.StartPump();
+            return session;
+        }
+
+        private static bool Wait(Func<bool> condition, int timeoutMs = 3000)
+        {
+            var clock = Stopwatch.StartNew();
+            while (clock.ElapsedMilliseconds < timeoutMs)
+            {
+                if (condition()) return true;
+                Thread.Sleep(20);
+            }
+            return condition();
+        }
+    }
 
     /// <summary>ASPEED block maps become the rectangles that changed.</summary>
 

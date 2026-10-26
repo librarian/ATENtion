@@ -506,6 +506,7 @@ namespace ATENtion.App
         {
             StatusTick?.Invoke(this, EventArgs.Empty);
             foreach (var c in _sessions) c.RaiseTabState();
+            RefreshPowerStates();
             var ctx = _ctx;
             var s = ctx.Session;
             if (s == null)
@@ -556,11 +557,33 @@ namespace ATENtion.App
         private static string NoPictureText(KvmVideoSession s)
         {
             if (s.LastDecodeError != null) return "The video from this BMC can't be decoded: " + s.LastDecodeError;
+            if (s.VideoSignal == Core.Net.VideoSignalState.Absent)
+                return "No video signal - the host is off, or on but not sending video.";
             return "Waiting for video...";
         }
 
         // Read straight off the video stream (KvmVideoSession.VideoSignal): no dependency on Redfish
         // or IPMI being available. A hidden tab keeps it current with its periodic check.
+        private void RefreshPowerStates()
+        {
+            foreach (var ctx in _sessions)
+            {
+                var s = ctx.Session;
+                bool live = s != null && ctx.LiveConnected;
+                var power = PowerStatus.Displayed(s != null, ctx.LiveConnected, s?.HostPower ?? HostPowerState.Unknown);
+                var signal = PowerStatus.Displayed(s != null, ctx.LiveConnected,
+                    s?.VideoSignal ?? Core.Net.VideoSignalState.Unknown);
+                // A hidden tab's reading is only as fresh as its last check.
+                TimeSpan? age = null;
+                if (live && s.VideoPaused)
+                {
+                    DateTime seen = s.HostStatusSupported ? s.HostPowerUtc : s.VideoSignalUtc;
+                    if (seen != default(DateTime)) age = DateTime.UtcNow - seen;
+                }
+                ctx.UpdatePower(power, signal, age);
+            }
+        }
+
         private void SetupLogging()
         {
             // Name the log after the actually-running executable (rename the exe -> the log,

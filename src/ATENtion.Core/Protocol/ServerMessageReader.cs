@@ -49,6 +49,10 @@ namespace ATENtion.Core.Protocol
         /// string, of the form <c>&lt;sid&gt; ROLE &lt;clientip&gt;</c>.
         /// </summary>
         public string PrivilegeInfo;
+        /// <summary>True for a host-status reply (0x37).</summary>
+        public bool HasHostStatus;
+        /// <summary>Whether the host is powered on, from a host-status reply.</summary>
+        public bool HostPowered;
         /// <summary>Why a rectangle in this update could not be decoded, or null.</summary>
         public string DecodeError;
     }
@@ -193,7 +197,15 @@ namespace ATENtion.Core.Protocol
 
                 case RfbMessageType.Server0x16: s.Skip(1); break;          // FUN_180009830
                 case RfbMessageType.Keyboard0x35: s.Skip(5); break;        // keyboard(2) + mouse(3) fields
-                case RfbMessageType.Screen0x37: s.Skip(3); break;
+                case RfbMessageType.Screen0x37:                            // host status, the reply to [0x37]
+                    {
+                        // Three bytes. The third is host power: 1 on a running host and 0 on each of
+                        // three powered-off X10 boards tested, whatever the video was doing.
+                        byte[] status = s.ReadExact(3);
+                        result.HasHostStatus = true;
+                        result.HostPowered = status[2] != 0;
+                        break;
+                    }
                 case RfbMessageType.Privilege0x39: // privilege/control grant (native FUN_180011d80)
                     {
                         // Two u32 words followed by a 256-byte "<sid> ROLE <clientip>" string. The native
