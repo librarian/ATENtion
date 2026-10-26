@@ -51,13 +51,19 @@ namespace ATENtion.Core.Video
     /// FUN_18000a9e0 / FUN_18000ad30.
     /// </para>
     /// </remarks>
-    public sealed class AtenTileDecoder
+    public sealed class AtenTileDecoder : System.IDisposable
     {
         // Sentinel returned by full-frame paths: a single rectangle with the full-screen marker
         // coordinates, which the renderer reads as "upload the whole surface".
         private static readonly DirtyRect[] FullScreen = { new DirtyRect(0xffff, 0xffff, 16, 16) };
 
         private readonly AtenPalette _palette = new AtenPalette();
+
+        // This decoder's own ASPEED state. The native 2-pass reference buffer and quantisation
+        // tables persist between frames, so each session needs its own or concurrent sessions
+        // overwrite one another.
+        private System.IntPtr _aspeedContext = System.IntPtr.Zero;
+        private bool _aspeedContextTried;
 
         // Scratch buffers reused across frames to keep the decode hot path allocation-free. The pump
         // thread is the sole caller, and the returned dirty list is consumed synchronously by the
@@ -124,7 +130,12 @@ namespace ATENtion.Core.Video
             // [selector][advance selector][0x01A6 = 4:2:0 or 0x01BC = 4:4:4][AJPG bits].
             if (rectangleEncoding == 0x57)
             {
-                AspeedNativeDecoder.Decode(packet, Frame);
+                if (!_aspeedContextTried)
+                {
+                    _aspeedContextTried = true;
+                    _aspeedContext = AspeedNativeDecoder.CreateContext();
+                }
+                AspeedNativeDecoder.Decode(packet, Frame, _aspeedContext);
                 return FullScreen;
             }
 
@@ -316,6 +327,13 @@ namespace ATENtion.Core.Video
                 _dirty.Add(new DirtyRect(px, py, TileSize, TileSize));
             }
             return _dirty;
+        }
+
+        /// <summary>Releases this decoder's native ASPEED context.</summary>
+        public void Dispose()
+        {
+            AspeedNativeDecoder.DestroyContext(_aspeedContext);
+            _aspeedContext = System.IntPtr.Zero;
         }
     }
 

@@ -1117,6 +1117,68 @@ ASPEED_EXPORT void aspeed_init(void)
     InitTable();
 }
 
+/*
+ * Per-session decoder state: the 2-pass reference buffer, the quantisation tables and the selectors
+ * they derive from all carry over between frames, so concurrent sessions sharing them decode each
+ * other's state. Everything else is rebuilt per call or read-only after aspeed_init.
+ *
+ * Swapped into the globals around the existing decode body rather than threaded through every
+ * function. Calls are still serialised by the caller.
+ */
+ASPEED_EXPORT void aspeed_decode(uint32_t*, int, unsigned char*, int, int, unsigned, unsigned, unsigned);
+
+struct aspeed_ctx {
+    struct YUV* yuv_buf;
+    int32_t QT[4][64];
+    unsigned char selector;
+    unsigned char advance_selector;
+    unsigned char first_frame;
+};
+
+ASPEED_EXPORT void* aspeed_ctx_new(void)
+{
+    struct aspeed_ctx* c = calloc(1, sizeof(*c));
+    if (c == NULL) return NULL;
+    c->yuv_buf = malloc((size_t)1920 * 1200 * 3);
+    if (c->yuv_buf == NULL) { free(c); return NULL; }
+    c->first_frame = 1;          /* force the quantisation tables to load on the first frame */
+    return c;
+}
+
+ASPEED_EXPORT void aspeed_ctx_free(void* ctx)
+{
+    struct aspeed_ctx* c = (struct aspeed_ctx*)ctx;
+    if (c == NULL) return;
+    free(c->yuv_buf);
+    free(c);
+}
+
+ASPEED_EXPORT void aspeed_decode_ctx(void* ctx, uint32_t* _in_buf, int _len, unsigned char* _out_buf,
+    int _width, int _height, unsigned _mode420, unsigned _sel, unsigned _adv_sel)
+{
+    struct aspeed_ctx* c = (struct aspeed_ctx*)ctx;
+    struct YUV* saved_yuv;
+    unsigned char saved_sel, saved_adv, saved_first;
+
+    if (c == NULL) {
+        aspeed_decode(_in_buf, _len, _out_buf, _width, _height, _mode420, _sel, _adv_sel);
+        return;
+    }
+
+    /* swap this session's state in */
+    saved_yuv = yuv_buf; saved_sel = selector; saved_adv = advance_selector; saved_first = first_frame;
+    yuv_buf = c->yuv_buf; selector = c->selector; advance_selector = c->advance_selector;
+    first_frame = c->first_frame;
+    memcpy(QT, c->QT, sizeof(QT));
+
+    aspeed_decode(_in_buf, _len, _out_buf, _width, _height, _mode420, _sel, _adv_sel);
+
+    /* and back out, keeping whatever the decode updated */
+    c->selector = selector; c->advance_selector = advance_selector; c->first_frame = first_frame;
+    memcpy(c->QT, QT, sizeof(QT));
+    yuv_buf = saved_yuv; selector = saved_sel; advance_selector = saved_adv; first_frame = saved_first;
+}
+
 ASPEED_EXPORT void aspeed_decode(uint32_t* _in_buf, int _len, unsigned char* _out_buf, int _width, int _height,
     unsigned _mode420, unsigned _sel, unsigned _adv_sel)
 {
