@@ -38,10 +38,12 @@
 #define BLOCK_AST2100_START_LENGTH 0x04
 #define BLOCK_AST2100_SKIP_LENGTH 20 // S:1 H:3 X:8 Y:8
 
+// Field order is the output byte order: the managed FrameBuffer is BGRA and is handed
+// straight to a WPF Bgra32 WriteableBitmap without a swizzle, so blue must come first.
 struct RGB {
-    BYTE R;
-    BYTE G;
     BYTE B;
+    BYTE G;
+    BYTE R;
     BYTE Reserved;
 };
 struct YUV {
