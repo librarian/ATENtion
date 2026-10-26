@@ -210,6 +210,10 @@
              reordered by dragging; the strip, not the ListBox, handles the pointer for that. -->
         <Border x:Name="TabStrip"
                 DockPanel.Dock="Top"
+                PreviewMouseLeftButtonDown="OnTabPointerDown"
+                PreviewMouseMove="OnTabPointerMove"
+                PreviewMouseLeftButtonUp="OnTabPointerUp"
+                LostMouseCapture="OnTabLostCapture"
                 MinHeight="30"
                 Background="#252526"
                 BorderBrush="#3A3A3A"
