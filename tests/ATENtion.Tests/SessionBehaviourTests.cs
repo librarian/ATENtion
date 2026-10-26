@@ -136,6 +136,18 @@ namespace ATENtion.Tests
 
     /// <summary>The privilege-record list logic on its own.</summary>
 
+    public class ArmingUrlTests
+    {
+        [Theory]
+        [InlineData("10.0.0.5", true, 0, "https://10.0.0.5:443")]
+        [InlineData("bmc.example", false, 0, "http://bmc.example:80")]
+        [InlineData("fd00::5", true, 0, "https://[fd00::5]:443")]
+        [InlineData("[fd00::5]", true, 8443, "https://[fd00::5]:8443")]
+        public void The_Web_Root_Is_A_Valid_Url(string host, bool https, int port, string expected)
+        {
+            Assert.Equal(expected, BmcArmingClient.WebBaseUrl(host, https, port));
+        }
+    }
 }
 
 namespace ATENtion.Tests
