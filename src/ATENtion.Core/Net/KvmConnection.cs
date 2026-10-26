@@ -117,6 +117,7 @@ namespace ATENtion.Core.Net
             // the sender mid-frame. Matches the native viewer and the virtual-media path.
             _tcp = TcpConnect.Open(_options.Host, _options.Port, _options.ConnectTimeoutMs, tcp =>
             {
+                try { tcp.ReceiveBufferSize = 0x88b80; tcp.SendBufferSize = 0x88b80; } catch { }
             });
             // Bounded until the handshake completes; Handshake lifts the read limit afterwards.
             _tcp.ReceiveTimeout = _options.HandshakeTimeoutMs;
