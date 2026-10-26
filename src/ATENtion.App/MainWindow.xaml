@@ -196,9 +196,11 @@
                 <MenuItem Header="_Clear Log"
                         Click="OnClearLog"/>
             </MenuItem>
-            <MenuItem Header="_Storage">
+            <MenuItem Header="_Storage" SubmenuOpened="OnStorageMenuOpened">
                 <!-- Filled in when the menu opens, from the BMC's virtual-media slots. -->
-
+                <MenuItem x:Name="VmediaStateItem"
+                        Header="Virtual media: not connected"
+                        IsEnabled="False"/>
                 <Separator/>
                 <MenuItem x:Name="MountIsoItem"
                         Header="_Mount ISO…"
