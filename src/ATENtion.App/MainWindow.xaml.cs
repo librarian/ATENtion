@@ -79,7 +79,13 @@ namespace ATENtion.App
         private DateTime? _connectedAt { get => _ctx.ConnectedAt; set => _ctx.ConnectedAt = value; }
         private int _noFrameTicks { get => _ctx.NoFrameTicks; set => _ctx.NoFrameTicks = value; }
 
-        private const int WaitGraceTicks = 2;
+        /// <summary>Seconds without a decoded frame before the "Waiting for video" overlay shows.</summary>
+        /// <remarks>
+        /// Tracks the request interval: a frame cannot arrive more often than one is asked for, so a
+        /// fixed grace would show the overlay for most of every interval.
+        /// </remarks>
+        private int WaitGraceTicks =>
+            _fullFrameInterval == ContinuousRefresh ? 2 : Math.Max(2, _fullFrameInterval + 1);
 
         // Persistent connection-state line, plus a transient "flash" that reverts to it.
         private readonly DispatcherTimer _flashTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(4) };
@@ -142,6 +148,7 @@ namespace ATENtion.App
             var ctx = RegisterContext(new SessionContext
             {
                 // Inherit from the tab this was opened from rather than resetting to the defaults.
+                FullFrameInterval = _ctx.FullFrameInterval,
             });
             SessionTabs.SelectedItem = ctx;           // raises OnSessionTabChanged, which swaps _ctx
             ShowConnectDialog();
@@ -203,6 +210,7 @@ namespace ATENtion.App
             if (ctx.OverlayVisible) ShowOverlay(ctx.OverlayText); else HideOverlay();
             RefreshStorageMenu(ctx);
             // Re-tick for the tab being shown. Sync only - it already has these values.
+            SyncFullRefreshMenu();
             RepaintActive();
             UpdateTitle();
         }
@@ -313,6 +321,7 @@ namespace ATENtion.App
                     // Always keep one tab: closing the last session leaves an empty one to connect from.
                     next = RegisterContext(new SessionContext
                     {
+                        FullFrameInterval = ctx.FullFrameInterval,
                     });
                 }
                 else
@@ -355,6 +364,8 @@ namespace ATENtion.App
             // sent a mode whose coordinates the client cannot produce correctly.
             _mouseMode = MouseMode.Absolute;
             UpdateMouseModeMenu();
+            _fullFrameInterval = s.FullFrameIntervalSeconds;
+            ApplyFullRefreshInterval();
             StreamAllTabsItem.IsChecked = s.StreamAllTabs;
             ApplyTabStreaming();
             OnToggleLog(null, null);
@@ -395,6 +406,7 @@ namespace ATENtion.App
                 AutoReconnect = AutoReconnectItem.IsChecked,
                 EnableLogging = EnableLoggingItem.IsChecked,
                 MouseMode = (int)_mouseMode,
+                FullFrameIntervalSeconds = _fullFrameInterval,
                 StreamAllTabs = StreamAllTabsItem.IsChecked,
                 ReopenTabs = ReopenTabsItem.IsChecked,
                 OpenProfileIds = _sessions
@@ -813,6 +825,11 @@ namespace ATENtion.App
                         MouseMode = (byte)_mouseMode, // enum value == on-wire mode byte
                         // From ctx, not the forwarding properties: this runs on a background task
                         // and may be a tab that is not the visible one.
+                        // View > Full frame requests. Continuous (-1) asks for every frame in full.
+                        AlwaysRequestFullFrames = ctx.FullFrameInterval == ContinuousRefresh,
+                        // 1, not 0, in continuous: see ApplyFullRefreshInterval.
+                        FullRefreshIntervalTicks =
+                            ctx.FullFrameInterval == ContinuousRefresh ? 1 : ctx.FullFrameInterval,
                         LogInput = Core.Diagnostics.KvmLog.Enabled, // skip per-packet hex build when logging is off
                     };
                     var owned = session;
@@ -1273,6 +1290,60 @@ namespace ATENtion.App
         }
 
         /// <summary>Toggle bitmap scaling quality for upscaled video (crisp NearestNeighbor vs smooth).</summary>
+        // Seconds between full frame requests, mirrored into the live session's
+        // FullRefreshIntervalTicks (the session's timer ticks once a second). 0 = incremental only.
+        private int _fullFrameInterval { get => _ctx.FullFrameInterval; set => _ctx.FullFrameInterval = value; }
+
+        /// <summary>Sentinel for <see cref="_fullFrameInterval"/>: ask for a full frame every time.</summary>
+        private const int ContinuousRefresh = -1;
+
+        private IEnumerable<KeyValuePair<int, MenuItem>> FullRefreshItems()
+        {
+            yield return new KeyValuePair<int, MenuItem>(ContinuousRefresh, RefreshContinuousItem);
+            yield return new KeyValuePair<int, MenuItem>(1, Refresh1Item);
+            yield return new KeyValuePair<int, MenuItem>(2, Refresh2Item);
+            yield return new KeyValuePair<int, MenuItem>(3, Refresh3Item);
+            yield return new KeyValuePair<int, MenuItem>(5, Refresh5Item);
+            yield return new KeyValuePair<int, MenuItem>(10, Refresh10Item);
+            yield return new KeyValuePair<int, MenuItem>(0, RefreshOffItem);
+        }
+
+        private void OnFullRefreshInterval(object sender, RoutedEventArgs e)
+        {
+            var item = sender as MenuItem;
+            if (item == null) return;
+            int seconds;
+            if (!int.TryParse(item.Tag as string, out seconds)) return;
+            _fullFrameInterval = seconds;
+            ApplyFullRefreshInterval();
+            FlashStatus(seconds == ContinuousRefresh
+                ? "Full frame requests: continuous - every frame (~5 Mbps)."
+                : seconds > 0
+                    ? $"Full frame requests: every {seconds}s."
+                    : "Full frame requests: off - incremental only.");
+        }
+
+        // Checks the selected entry (these are radio-style: IsCheckable drives the tick, but only one
+        // may be set) and pushes the value to the running session so it takes effect without a reconnect.
+        /// <summary>Ticks the menu entry matching the visible tab, without touching the session.</summary>
+        private void SyncFullRefreshMenu()
+        {
+            foreach (var entry in FullRefreshItems())
+                if (entry.Value != null) entry.Value.IsChecked = entry.Key == _fullFrameInterval;
+        }
+
+        private void ApplyFullRefreshInterval()
+        {
+            SyncFullRefreshMenu();
+            var session = _session;
+            if (session == null) return;
+            bool continuous = _fullFrameInterval == ContinuousRefresh;
+            session.AlwaysRequestFullFrames = continuous;
+            // Continuous keeps the timer rather than disabling it: the other branch only fires when
+            // nothing is in flight, so interval 0 left a dropped request with no recovery.
+            session.FullRefreshIntervalTicks = continuous ? 1 : _fullFrameInterval;
+        }
+
         private void OnToggleSmoothScaling(object sender, RoutedEventArgs e)
         {
             if (VideoImage == null) return;
@@ -1490,7 +1561,17 @@ namespace ATENtion.App
             owner.VmClosed = closed;
             owner.RaiseTabState();
             RefreshStorageMenu(owner);
-            if (ReferenceEquals(owner, _ctx)) FlashStatus($"Mounted {name} as virtual CD-ROM.");
+            // Media attached changes what the refresh interval costs, so say so once.
+            bool slow = owner.FullFrameInterval == 0 || owner.FullFrameInterval > 2;
+            if (slow)
+                Core.Diagnostics.KvmLog.Write(
+                    "Virtual media attached. This firmware only re-encodes the screen for a full " +
+                    "frame request, so the update rate is whatever View > Full frame requests is " +
+                    "set to. Choose Continuous for real motion.");
+            if (ReferenceEquals(owner, _ctx))
+                FlashStatus(slow
+                    ? $"Mounted {name}. For smoother video set View ▸ Full frame requests ▸ Continuous."
+                    : $"Mounted {name} as virtual CD-ROM.");
         }
 
         /// <summary>Brings the Storage menu into line with a tab, if it is the visible one.</summary>
@@ -1609,6 +1690,7 @@ namespace ATENtion.App
             {
                 var ctx = i == 0 ? _ctx : RegisterContext(new SessionContext
                 {
+                    FullFrameInterval = _ctx.FullFrameInterval,
                 });
                 ctx.ConnectProfile = wanted[i];
                 ctx.ConnectOptions = ConnectWindow.OptionsFor(wanted[i]);

@@ -127,6 +127,24 @@ namespace ATENtion.Core.Net
         /// retained only as an explicit compatibility/performance experiment.</summary>
         public int PipelineDepth { get; set; } = 1;
 
+        /// <summary>At least two while every frame is full.</summary>
+        /// <remarks>
+        /// Depth one exists to apply delta frames in order against the displayed baseline. A full
+        /// frame is self-contained, so that constraint does not apply and the round trip can overlap.
+        /// </remarks>
+        private int EffectivePipelineDepth =>
+            AlwaysRequestFullFrames ? Math.Max(PipelineDepth, 2) : PipelineDepth;
+
+        /// <summary>
+        /// Request every frame as a full, non-incremental update.
+        /// </summary>
+        /// <remarks>
+        /// ATEN/ASPEED firmware only re-encodes the console for a non-incremental request;
+        /// incremental ones are answered from a cached encode. Full frames are therefore the only
+        /// fresh ones, at roughly 7x the bandwidth.
+        /// </remarks>
+        public bool AlwaysRequestFullFrames { get; set; }
+
         /// <summary>
         /// Stop streaming video while keeping the session, its keepalive and any mounted media up.
         /// </summary>
@@ -321,7 +339,7 @@ namespace ATENtion.Core.Net
         private void TopUp()
         {
             while (_running && !_videoPaused &&
-                   System.Threading.Volatile.Read(ref _outstanding) < PipelineDepth)
+                   System.Threading.Volatile.Read(ref _outstanding) < EffectivePipelineDepth)
             {
                 SendUpdate(incremental: true);
             }
@@ -423,6 +441,8 @@ namespace ATENtion.Core.Net
         /// (FUN_180011950 + FUN_180013060).</summary>
         private void SendUpdate(bool incremental)
         {
+            // The BMC only re-encodes on a non-incremental request; see AlwaysRequestFullFrames.
+            if (AlwaysRequestFullFrames) incremental = false;
 
             // Per-cycle message is JUST the FramebufferUpdateRequest. The original viewer sends
             // runImage ([7,0x0780]) only ONCE at startup, not every cycle (pcap) -
@@ -480,7 +500,7 @@ namespace ATENtion.Core.Net
                 SendUpdate(incremental: false); // first keyframe (bare FBUR)
                 // Prime the request pipeline: keep PipelineDepth FBURs in flight so the BMC encodes
                 // the next frame while the current one is decoded and presented (overlaps the round trip).
-                for (int i = 1; i < PipelineDepth; i++) SendUpdate(incremental: true);
+                for (int i = 1; i < EffectivePipelineDepth; i++) SendUpdate(incremental: true);
                 // Tell the BMC the configured mouse mode (native sends setMouseMode on connect). Absolute (1) is needed for the absolute pointer coordinates to track.
                 WriteNow(new byte[] { 0x36, 0x00, MouseMode });
                 // NOTE: do NOT auto-send hotPlug (0x3a). It appears to be a toggle/replug pulse with
