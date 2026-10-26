@@ -342,7 +342,71 @@ namespace ATENtion.Tests
     }
 
     /// <summary>ASPEED block maps become the rectangles that changed.</summary>
+    public class DirtyBlockTests
+    {
+        private static IReadOnlyList<ATENtion.Core.Video.DirtyRect> Run(int width, int height, int block, params (int col, int row)[] marked)
+        {
+            int columns = (width + block - 1) / block, rows = (height + block - 1) / block;
+            var map = new byte[columns * rows];
+            foreach (var (col, row) in marked) map[row * columns + col] = 1;
+            return ATENtion.Core.Video.AtenTileDecoder.DirtyFromBlocks(map, width, height, block,
+                new List<ATENtion.Core.Video.DirtyRect>());
+        }
 
+        [Fact]
+        public void Nothing_Written_Means_Nothing_Changed()
+        {
+            Assert.Empty(Run(64, 48, 8));
+        }
+
+        [Fact]
+        public void A_Run_In_A_Row_Is_One_Rectangle()
+        {
+            var r = Assert.Single(Run(64, 48, 8, (2, 1), (3, 1), (4, 1)));
+            Assert.Equal((16, 8, 24, 8), (r.X, r.Y, r.Width, r.Height));
+        }
+
+        [Fact]
+        public void The_Same_Run_In_The_Next_Rows_Extends_Downwards()
+        {
+            var r = Assert.Single(Run(64, 48, 8, (1, 2), (2, 2), (1, 3), (2, 3), (1, 4), (2, 4)));
+            Assert.Equal((8, 16, 16, 24), (r.X, r.Y, r.Width, r.Height));
+        }
+
+        [Fact]
+        public void Different_Runs_Stay_Separate()
+        {
+            var rects = Run(64, 48, 8, (0, 0), (5, 0), (0, 1), (1, 1));
+            Assert.Equal(3, rects.Count);
+        }
+
+        [Fact]
+        public void Edge_Blocks_Are_Clipped_To_The_Frame()
+        {
+            // 100x60 in 16px blocks: the last column is 4px wide and the last row 12px tall.
+            var r = Assert.Single(Run(100, 60, 16, (6, 3)));
+            Assert.Equal((96, 48, 4, 12), (r.X, r.Y, r.Width, r.Height));
+        }
+
+        [Fact]
+        public void A_Whole_Keyframe_Is_One_Rectangle()
+        {
+            var all = new List<(int, int)>();
+            for (int row = 0; row < 6; row++) for (int col = 0; col < 8; col++) all.Add((col, row));
+            var r = Assert.Single(Run(64, 48, 8, all.ToArray()));
+            Assert.Equal((0, 0, 64, 48), (r.X, r.Y, r.Width, r.Height));
+        }
+
+        [Fact]
+        public void Too_Many_Pieces_Become_A_Whole_Screen_Update()
+        {
+            var scattered = new List<(int, int)>();
+            for (int row = 0; row < 48; row += 2) for (int col = 0; col < 128; col += 2) scattered.Add((col, row));
+            var rects = Run(1024, 384, 8, scattered.ToArray());
+            var r = Assert.Single(rects);
+            Assert.Equal(0xffff, r.X);   // the whole-screen sentinel
+        }
+    }
 }
 
 namespace ATENtion.Tests
