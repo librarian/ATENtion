@@ -310,9 +310,10 @@ namespace ATENtion.Core.Net
         /// <remarks>Sent by the input thread, so a caller on the UI thread never blocks on the socket.</remarks>
         public void RequestFullRefresh()
         {
-            try { SendUpdate(incremental: false); } catch (Exception ex) { Diagnostics.KvmLog.Error("manual refresh", ex); }
+            _fullRefreshRequested = true;
+            Wake();
         }
-
+        private volatile bool _fullRefreshRequested;
 
         /// <summary>Issues one framebuffer-update request and accounts for it in the request
         /// pipeline. The per-cycle message is the FramebufferUpdateRequest alone: runImage
@@ -371,14 +372,14 @@ namespace ATENtion.Core.Net
                     _connection.Stream.WriteU8(0x37);
                     _connection.Stream.Flush();
                 }
-                SendScreenInfo(ImageQuality, ImageMode);
+                WriteNow(ScreenInfoRequest.Build(ImageQuality, ImageMode));
                 SendRunImage();                 // runImage [7,0x0780] - once, like the original
                 SendUpdate(incremental: false); // first keyframe (bare FBUR)
                 // Prime the request pipeline: keep PipelineDepth FBURs in flight so the BMC encodes
                 // the next frame while the current one is decoded and presented (overlaps the round trip).
                 for (int i = 1; i < PipelineDepth; i++) SendUpdate(incremental: true);
                 // Tell the BMC the configured mouse mode (native sends setMouseMode on connect). Absolute (1) is needed for the absolute pointer coordinates to track.
-                SendMouseMode(MouseMode);
+                WriteNow(new byte[] { 0x36, 0x00, MouseMode });
                 // NOTE: do NOT auto-send hotPlug (0x3a). It appears to be a toggle/replug pulse with
                 // no parameter; the virtual USB keyboard/mouse is normally already attached, so an
                 // auto-send can TOGGLE it OFF. It's exposed as a manual menu action instead.
@@ -542,6 +543,13 @@ namespace ATENtion.Core.Net
                 byte[] move = null; // then the single latest coalesced move, if any
                 lock (_inputLock) { if (_movePending) { move = _moveFrame; _movePending = false; } }
                 if (move != null) WriteFrame(move);
+
+                if (_fullRefreshRequested)
+                {
+                    _fullRefreshRequested = false;
+                    try { SendUpdate(incremental: false); }
+                    catch (Exception ex) { if (_senderRunning) Diagnostics.KvmLog.Error("manual refresh", ex); }
+                }
             }
         }
 
@@ -572,7 +580,7 @@ namespace ATENtion.Core.Net
             else
             {
                 lock (_inputLock) { _discrete.Enqueue(new InputItem(frame, false, 0)); _movePending = false; }
-                _inputSignal.Set();
+                Wake();
             }
             if (LogInput)
             {
@@ -613,7 +621,7 @@ namespace ATENtion.Core.Net
                     _discrete.Enqueue(new InputItem(frame, coalescible, coalescible ? stampMs : 0));
             }
             if (dropped) { NoteDroppedRepeat(); return; }
-            _inputSignal.Set();
+            Wake();
             if (LogInput)
                 Diagnostics.KvmLog.Write($"TX key keysym=0x{keysym:x4} {(down ? "down" : "up")}{(autoRepeat ? " (repeat)" : "")} : " +
                                          Diagnostics.KvmLog.Hex(frame));
@@ -634,8 +642,8 @@ namespace ATENtion.Core.Net
                     _discrete.Enqueue(new InputItem(_keyboard.BuildKeyEvent(keysym, false), false, 0));
                 _heldKeys.Clear();
             }
-            _inputSignal.Set();
-            if (LogInput) Diagnostics.KvmLog.Write($"input: released {n} held key(s) on focus loss.");
+            Wake();
+            if (LogInput) Diagnostics.KvmLog.Write($"input: released {n} held key(s).");
         }
 
         /// <summary>Tally a shed auto-repeat and emit at most ~1 diagnostic line/sec (logging on).</summary>
@@ -657,11 +665,7 @@ namespace ATENtion.Core.Net
         public void SendMouseMode(byte mode = 1)
         {
             byte[] frame = { 0x36, 0x00, mode };
-            lock (_sendLock)
-            {
-                _connection.Stream.WriteBytes(frame);
-                _connection.Stream.Flush();
-            }
+            Post(frame);
             Diagnostics.KvmLog.Write($"TX mousemode {mode} : " + Diagnostics.KvmLog.Hex(frame));
         }
 
@@ -670,11 +674,7 @@ namespace ATENtion.Core.Net
         public void SendScreenInfo(byte quality, ushort mode)
         {
             byte[] frame = ScreenInfoRequest.Build(quality, mode);
-            lock (_sendLock)
-            {
-                _connection.Stream.WriteBytes(frame);
-                _connection.Stream.Flush();
-            }
+            Post(frame);
             Diagnostics.KvmLog.Write($"TX screeninfo quality={quality} mode={mode} : " +
                 Diagnostics.KvmLog.Hex(frame));
         }
@@ -684,12 +684,39 @@ namespace ATENtion.Core.Net
         /// BMC's virtual HID, injected keystrokes/mouse go nowhere until this is sent.</summary>
         public void SendHotPlug()
         {
+            Post(new byte[] { 0x3a });
+            Diagnostics.KvmLog.Write("TX hotplug : 3a");
+        }
+
+        // Control frames from the UI go out on the input thread, in order with keys and clicks, so
+        // the caller never waits on the socket. Before the pump starts they are written directly.
+        private void Post(byte[] frame)
+        {
+            if (!_senderRunning)
+            {
+                // Before the pump starts, or after the session stopped; the latter has no socket left.
+                try { WriteNow(frame); }
+                catch (Exception ex) { Diagnostics.KvmLog.Error("control send", ex); }
+                return;
+            }
+            lock (_inputLock) { _discrete.Enqueue(new InputItem(frame, false, 0)); }
+            Wake();
+        }
+
+        // Wakes the input thread. A call that races a teardown finds the handle already released;
+        // there is nothing left to wake then.
+        private void Wake()
+        {
+            try { _inputSignal.Set(); } catch (ObjectDisposedException) { }
+        }
+
+        private void WriteNow(byte[] frame)
+        {
             lock (_sendLock)
             {
-                _connection.Stream.WriteU8(0x3a);
+                _connection.Stream.WriteBytes(frame);
                 _connection.Stream.Flush();
             }
-            Diagnostics.KvmLog.Write("TX hotplug : 3a");
         }
 
         /// <summary>Send a chassis power command (OEM record <c>[0x1a][code]</c>).</summary>
@@ -697,7 +724,7 @@ namespace ATENtion.Core.Net
         {
             byte[] frame = PowerControl.Build(command);
             lock (_inputLock) { _discrete.Enqueue(new InputItem(frame, false, 0)); }
-            _inputSignal.Set();
+            Wake();
             if (LogInput)
                 Diagnostics.KvmLog.Write($"TX power {command} : " + Diagnostics.KvmLog.Hex(frame));
         }
