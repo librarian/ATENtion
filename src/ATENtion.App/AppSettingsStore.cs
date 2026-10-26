@@ -49,7 +49,9 @@ namespace ATENtion.App
         /// <summary>Seconds between full frame requests; 0 sends incremental requests only, -1 asks every frame.</summary>
         public int FullFrameIntervalSeconds = 5;
         /// <summary>ATEN chroma mode: 444 Enhanced Text (default) or 422 Normal.</summary>
+        public int ImageMode = 444;
         /// <summary>ATEN image quality level, 0 through 11 (default 11).</summary>
+        public int ImageQuality = 11;
         /// <summary>True to let tabs that are not visible keep requesting video.</summary>
         public bool StreamAllTabs;
         /// <summary>Most frames a second a tab asks for; 0 for no limit.</summary>
@@ -105,6 +107,8 @@ namespace ATENtion.App
                     new XAttribute("enableLogging", EnableLogging),
                     new XAttribute("mouseMode", MouseMode),
                     new XAttribute("fullRefreshSeconds", FullFrameIntervalSeconds),
+                    new XAttribute("imageMode", ImageMode),
+                    new XAttribute("imageQuality", ImageQuality),
                     new XAttribute("streamAllTabs", StreamAllTabs),
                     new XAttribute("reopenTabs", ReopenTabs));
 
@@ -171,6 +175,8 @@ namespace ATENtion.App
                     result.EnableLogging = Bool(ui, "enableLogging");
                     result.MouseMode = Int(ui, "mouseMode", 1);
                     result.FullFrameIntervalSeconds = Int(ui, "fullRefreshSeconds", 5);
+                    result.ImageMode = Int(ui, "imageMode", 444);
+                    result.ImageQuality = Int(ui, "imageQuality", 11);
                     result.StreamAllTabs = Bool(ui, "streamAllTabs");
                     result.ReopenTabs = Bool(ui, "reopenTabs", true);
                 }

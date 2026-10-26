@@ -128,7 +128,28 @@
                 <!-- The vendor viewer's "Display Preference": chroma/compression mode plus an image
                      quality level. Both are sent with changeScreenInfo (0x32) and take effect on the
                      running session. -->
-
+                <MenuItem Header="_Display preference">
+                    <MenuItem x:Name="Mode444Item"
+                            Header="Enhanced _text (4:4:4) - default"
+                            IsCheckable="True" Tag="444" Click="OnImageMode"
+                            ToolTip="Full chroma. Sharpest text, and on ATEN/ASPEED firmware the only mode that returns freshly encoded frames."/>
+                    <MenuItem x:Name="Mode422Item"
+                            Header="_Normal (4:2:2)"
+                            IsCheckable="True" Tag="422" Click="OnImageMode"
+                            ToolTip="Subsampled chroma. Measured on an ASPEED board this was worse in every way: cached (stale) frames, LARGER frames than 4:4:4, and lower throughput. Offered because other firmware may differ."/>
+                    <Separator/>
+                    <MenuItem x:Name="Quality11Item" Header="Quality: _highest (11) - default"
+                            IsCheckable="True" Tag="11" Click="OnImageQuality"/>
+                    <MenuItem x:Name="Quality9Item" Header="Quality: hi_gh (9)"
+                            IsCheckable="True" Tag="9" Click="OnImageQuality"/>
+                    <MenuItem x:Name="Quality6Item" Header="Quality: _medium (6)"
+                            IsCheckable="True" Tag="6" Click="OnImageQuality"/>
+                    <MenuItem x:Name="Quality3Item" Header="Quality: _low (3)"
+                            IsCheckable="True" Tag="3" Click="OnImageQuality"/>
+                    <MenuItem x:Name="Quality0Item" Header="Quality: l_owest (0)"
+                            IsCheckable="True" Tag="0" Click="OnImageQuality"
+                            ToolTip="Smallest frames. Useful with Full frame requests set to Continuous, where bandwidth is the limit: quality 2 roughly halves the per-frame size against quality 11."/>
+                </MenuItem>
             </MenuItem>
             <MenuItem Header="_Connection">
                 <MenuItem Header="_New Session Tab…"
