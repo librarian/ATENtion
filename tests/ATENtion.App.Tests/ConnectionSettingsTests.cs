@@ -5,6 +5,9 @@ using Xunit;
 
 namespace ATENtion.App.Tests
 {
+    // The settings store is a process-wide singleton, so tests that point it at a file must not
+    // run alongside each other.
+    [Collection(SettingsStoreCollection.Name)]
     public sealed class ConnectionSettingsTests : IDisposable
     {
         private readonly string _directory;
@@ -56,6 +59,78 @@ namespace ATENtion.App.Tests
         }
 
         [Fact]
+        public void Typing_A_New_Host_Into_A_Loaded_Profile_Saves_A_New_Profile()
+        {
+            var first = new ConnectSettings { Name = "Rack A", Host = "10.8.54.20", User = "admin" };
+            first.Save();
+
+            // The dialog opens on "Rack A"; the user types a different host over its fields.
+            var edited = first.Clone();
+            edited.Host = "10.8.54.21";
+            edited.ResolveIdentity(first.Name);
+            edited.Save();
+
+            StableSettingsStore.ResetForTests(_settingsPath);
+            var profiles = ConnectSettings.LoadProfiles();
+            Assert.Equal(2, profiles.Count);
+            Assert.Equal("Rack A", profiles.Single(p => p.Host == "10.8.54.20").Name);
+            Assert.Equal("10.8.54.21", profiles.Single(p => p.Host == "10.8.54.21").Name);
+            Assert.NotEqual(first.Id, profiles.Single(p => p.Host == "10.8.54.21").Id);
+        }
+
+        [Fact]
+        public void Same_Host_Updates_The_Existing_Profile_And_Keeps_A_Rename()
+        {
+            var first = new ConnectSettings { Name = "Rack A", Host = "10.8.54.20", User = "admin" };
+            first.Save();
+
+            var edited = first.Clone();
+            edited.Name = "Rack A (spare)";
+            edited.User = "operator";
+            edited.ResolveIdentity(first.Name);
+            edited.Save();
+
+            StableSettingsStore.ResetForTests(_settingsPath);
+            var loaded = ConnectSettings.LoadProfiles().Single();
+            Assert.Equal(first.Id, loaded.Id);
+            Assert.Equal("Rack A (spare)", loaded.Name);
+            Assert.Equal("operator", loaded.User);
+        }
+
+        [Fact]
+        public void A_Host_Matching_Another_Saved_Profile_Updates_That_Profile()
+        {
+            var a = new ConnectSettings { Name = "Rack A", Host = "10.8.54.20" };
+            a.Save();
+            var b = new ConnectSettings { Name = "Rack B", Host = "10.8.54.21" };
+            b.Save();
+
+            var edited = a.Clone();
+            edited.Host = "10.8.54.21";
+            edited.ResolveIdentity(a.Name);
+            edited.Save();
+
+            StableSettingsStore.ResetForTests(_settingsPath);
+            var profiles = ConnectSettings.LoadProfiles();
+            Assert.Equal(2, profiles.Count);
+            Assert.Equal("Rack B", profiles.Single(p => p.Id == b.Id).Name);
+        }
+
+
+        [Fact]
+        public void An_Unreadable_Settings_File_Is_Kept_Rather_Than_Overwritten()
+        {
+            Directory.CreateDirectory(_directory);
+            File.WriteAllText(_settingsPath, "<ATENtionSettings><Connections><Profile host=");
+
+            StableSettingsStore.ResetForTests(_settingsPath);
+            StableSettingsStore.Get();
+
+            Assert.Contains(Directory.GetFiles(_directory),
+                f => Path.GetFileName(f).StartsWith("settings.xml.unreadable-", StringComparison.Ordinal));
+        }
+
+        [Fact]
         public void UiSettings_Reload_From_Stable_File()
         {
             new UiSettings
@@ -83,5 +158,11 @@ namespace ATENtion.App.Tests
         {
             try { Directory.Delete(_directory, true); } catch { }
         }
+    }
+
+    [CollectionDefinition(Name, DisableParallelization = true)]
+    public sealed class SettingsStoreCollection
+    {
+        public const string Name = "Settings store";
     }
 }
