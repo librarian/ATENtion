@@ -70,13 +70,68 @@ namespace ATENtion.App.Tests
             Assert.NotEqual(closing, next);
         }
 
+        [Theory]
+        [InlineData(true, true, VideoSignalState.Present, VideoSignalState.Present)]
+        [InlineData(true, true, VideoSignalState.Absent, VideoSignalState.Absent)]
+        // After a drop the last reading says nothing about the host now.
+        [InlineData(true, false, VideoSignalState.Present, VideoSignalState.Unknown)]
+        [InlineData(false, false, VideoSignalState.Present, VideoSignalState.Unknown)]
+        public void The_Glyph_Only_Trusts_A_Live_Link(bool hasSession, bool live, VideoSignalState signal,
+                                                     VideoSignalState expected)
+        {
+            Assert.Equal(expected, PowerStatus.Displayed(hasSession, live, signal));
+        }
 
-
+        [Fact]
+        public void A_Checked_Tab_Says_How_Old_Its_Reading_Is()
+        {
+            Assert.Equal("Host on - video signal present",
+                PowerStatus.Tip(VideoSignalState.Present, null));
+            Assert.Equal("Host on - video signal present (checked 7s ago)",
+                PowerStatus.Tip(VideoSignalState.Present, TimeSpan.FromSeconds(7.8)));
+            Assert.EndsWith("(checked 0s ago)",
+                PowerStatus.Tip(VideoSignalState.Absent, TimeSpan.FromSeconds(-1)));
+            Assert.DoesNotContain("checked",
+                PowerStatus.Tip(VideoSignalState.Unknown, TimeSpan.FromSeconds(3)));
+        }
     }
 }
 
 namespace ATENtion.App.Tests
 {
     /// <summary>The power glyph prefers the BMC's power report to the video signal.</summary>
+    public class HostPowerGlyphTests
+    {
+        [Theory]
+        [InlineData(HostPowerState.On, VideoSignalState.Absent, true)]      // on with no picture: now green
+        [InlineData(HostPowerState.On, VideoSignalState.Present, true)]
+        [InlineData(HostPowerState.Off, VideoSignalState.Present, false)]   // the report wins
+        [InlineData(HostPowerState.Unknown, VideoSignalState.Present, true)] // no report: a picture proves on
+        [InlineData(HostPowerState.Unknown, VideoSignalState.Absent, false)]
+        [InlineData(HostPowerState.Unknown, VideoSignalState.Unknown, false)]
+        public void The_Glyph_Is_Green_Only_When_The_Host_Is_Known_To_Be_On(
+            HostPowerState power, VideoSignalState signal, bool on)
+        {
+            Assert.Equal(on, PowerStatus.IsOn(power, signal));
+        }
 
+        [Fact]
+        public void The_Tooltip_Says_What_The_BMC_Reported()
+        {
+            Assert.Equal("Host on", PowerStatus.Tip(HostPowerState.On, VideoSignalState.Present, null));
+            Assert.StartsWith("Host on - no video signal", PowerStatus.Tip(HostPowerState.On, VideoSignalState.Absent, null));
+            Assert.Equal("Host off (checked 4s ago)",
+                PowerStatus.Tip(HostPowerState.Off, VideoSignalState.Absent, TimeSpan.FromSeconds(4.2)));
+            // Without a report, the signal-based wording as before.
+            Assert.Equal(PowerStatus.Tip(VideoSignalState.Absent, null),
+                PowerStatus.Tip(HostPowerState.Unknown, VideoSignalState.Absent, null));
+        }
+
+        [Fact]
+        public void A_Dropped_Link_Shows_Nothing_Known()
+        {
+            Assert.Equal(HostPowerState.Unknown, PowerStatus.Displayed(true, false, HostPowerState.On));
+            Assert.Equal(HostPowerState.On, PowerStatus.Displayed(true, true, HostPowerState.On));
+        }
+    }
 }

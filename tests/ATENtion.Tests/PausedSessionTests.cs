@@ -16,6 +16,22 @@ namespace ATENtion.Tests
     /// </remarks>
     public class PausedSessionTests
     {
+        [Fact]
+        public void Paused_Session_Checks_Its_Host_And_Updates_The_Signal()
+        {
+            // A BMC that ignores the host-status query, so the check is a full frame.
+            using (var bmc = new FakeBmc { HostStatusPower = -1 })
+            using (var session = Connect(bmc, pausedCheckSeconds: 1))
+            {
+                int afterStart = WaitForRequests(bmc, 1);   // the startup keyframe
+                Assert.True(WaitFor(() => session.VideoSignal == VideoSignalState.Absent));
+                DateTime first = session.VideoSignalUtc;
+
+                Assert.True(WaitFor(() => bmc.FullRequests >= afterStart + 2, 4000),
+                    $"expected periodic checks while paused, saw {bmc.FullRequests - afterStart}");
+                Assert.True(WaitFor(() => session.VideoSignalUtc > first));
+            }
+        }
 
         [Fact]
         public void Paused_Session_With_Checks_Off_Sends_No_Requests()

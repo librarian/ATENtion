@@ -213,9 +213,44 @@ namespace ATENtion.Core.Net
         /// Drives the stall watchdog.</summary>
         public DateTime LastMessageUtc { get; private set; }
 
+        /// <summary>Whether the BMC is producing a picture, inferred from the video stream.</summary>
+        /// <remarks>
+        /// The protocol has no power status, so this reads the no-signal marker instead. Present is
+        /// certain; Absent means no picture, which is usually a powered-down host but also matches
+        /// one that is running and not producing video.
+        /// </remarks>
+        public VideoSignalState VideoSignal { get; private set; } = VideoSignalState.Unknown;
+
+        /// <summary>Host power as the BMC reports it, from the reply to a host-status query.</summary>
+        /// <remarks>
+        /// Unlike <see cref="VideoSignal"/>, this tells a host that is off from one that is on with
+        /// no picture. The BMC answers only when asked; see <see cref="RequestHostStatus"/>.
+        /// </remarks>
+        public HostPowerState HostPower { get; private set; } = HostPowerState.Unknown;
+
+        /// <summary>UTC time of the latest host-status reply.</summary>
+        public DateTime HostPowerUtc { get; private set; }
+
+        /// <summary>Asks the BMC for host status (one byte, [0x37]); the reply updates <see cref="HostPower"/>.</summary>
+        public void RequestHostStatus() => Post(HostStatusQuery);
+
+        /// <summary>True once the BMC has answered a host-status query.</summary>
+        /// <remarks>The connect sequence sends one, as the vendor viewer does, so this is known early.</remarks>
+        public bool HostStatusSupported => HostPowerUtc != default(DateTime);
+
+        /// <summary>Seconds between host-status queries while streaming; 0 stops them.</summary>
+        /// <remarks>Hidden tabs use <see cref="PausedCheckSeconds"/> instead.</remarks>
+        public int HostStatusSeconds { get; set; } = 5;
+        private int _statusTicks;
+
+        private static readonly byte[] HostStatusQuery = { 0x37 };
+
         /// <summary>Why the latest video could not be decoded, or null once a frame decodes.</summary>
         /// <remarks>Lets the UI say why the screen stays blank instead of waiting indefinitely.</remarks>
         public string LastDecodeError { get; private set; }
+
+        /// <summary>UTC time <see cref="VideoSignal"/> was last confirmed by a frame or a no-signal marker.</summary>
+        public DateTime VideoSignalUtc { get; private set; }
 
         /// <summary>Input-control state from the server privilege grant (msg 0x39): true = this session
         /// controls input, false = view-only, null = not yet reported. See <see cref="PrivilegeChanged"/>.</summary>
@@ -273,9 +308,15 @@ namespace ATENtion.Core.Net
                         // back instead of a full frame. Others still get the full frame.
                         if (PausedCheckDue())
                         {
-                            SendUpdate(incremental: false);
+                            if (HostStatusSupported) WriteNow(HostStatusQuery);
+                            else SendUpdate(incremental: false);
                         }
                         return;
+                    }
+                    if (HostStatusSeconds > 0 && ++_statusTicks >= HostStatusSeconds)
+                    {
+                        _statusTicks = 0;
+                        WriteNow(HostStatusQuery);
                     }
                     int t = System.Threading.Interlocked.Increment(ref _ticksSinceFull);
                     if (FullRefreshIntervalTicks > 0 && t >= FullRefreshIntervalTicks)
@@ -528,10 +569,22 @@ namespace ATENtion.Core.Net
                         PrivilegeInfo = msg.PrivilegeInfo;
                         PrivilegeChanged?.Invoke(this, EventArgs.Empty);
                     }
+                    if (msg.HasHostStatus)
+                    {
+                        HostPower = msg.HostPowered ? HostPowerState.On : HostPowerState.Off;
+                        HostPowerUtc = DateTime.UtcNow;
+                    }
                     if (msg.IsFrame) LastDecodeError = null;
                     else if (msg.DecodeError != null) LastDecodeError = msg.DecodeError;
+                    if (msg.NoVideoSignal)
+                    {
+                        VideoSignal = VideoSignalState.Absent;
+                        VideoSignalUtc = DateTime.UtcNow;
+                    }
                     if (msg.IsFrame)
                     {
+                        VideoSignal = VideoSignalState.Present;
+                        VideoSignalUtc = DateTime.UtcNow;
                         FramesDecoded++;
                         LastFrameUtc = DateTime.UtcNow;
                         FrameDecoded?.Invoke(this, new FrameDecodedEventArgs(Decoder.Frame, msg.Dirty));
