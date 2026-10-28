@@ -1224,8 +1224,20 @@ namespace ATENtion.App
             if (_inputWired) return; // handlers read _session live, so wire only once
             _inputWired = true;
             VideoImage.MouseMove += (s, e) => SendMouse(e, isMove: true);   // coalesced (paced)
-            VideoImage.MouseDown += (s, e) => { UpdateButtons(e); VideoImage.Focus(); SendMouse(e, isMove: false); };
-            VideoImage.MouseUp += (s, e) => { UpdateButtons(e); SendMouse(e, isMove: false); };
+            // The video holds the mouse while a button is down, so a drag that ends outside it still
+            // sends the release rather than leaving the button held on the host.
+            VideoImage.MouseDown += (s, e) =>
+            {
+                UpdateButtons(e); VideoImage.Focus(); VideoImage.CaptureMouse(); SendMouse(e, isMove: false);
+            };
+            VideoImage.MouseUp += (s, e) =>
+            {
+                UpdateButtons(e); SendMouse(e, isMove: false);
+                if (_buttonMask == 0) VideoImage.ReleaseMouseCapture();
+            };
+            // Capture taken away mid-drag (a dialog, another window): the release will not come here.
+            VideoImage.LostMouseCapture += (s, e) => { if (_buttonMask != 0) ReleaseHeldButtons(_ctx); };
+            VideoImage.MouseWheel += (s, e) => SendWheel(e);
             VideoImage.Focusable = true;
             // Use the tunneling Preview events: WPF consumes KeyDown for focus navigation (arrows, Tab,
             // Esc, and so on) before the bubbling KeyDown fires, so the bubbling handlers would otherwise
@@ -1266,6 +1278,21 @@ namespace ATENtion.App
         private void OnDeactivated(object sender, EventArgs e) => ReleaseHeldInput(_ctx);
 
         // RFB reports the wheel as buttons 4 (up) and 5 (down), each notch a press and release.
+        private void SendWheel(MouseWheelEventArgs e)
+        {
+            if (_session?.Decoder == null) return;
+            SendMouse(e, isMove: true);   // updates the remembered position first
+            int notches = e.Delta / 120;
+            if (notches == 0) notches = Math.Sign(e.Delta);   // high-resolution wheels send smaller steps
+            int bit = notches > 0 ? 0x08 : 0x10;
+            for (int i = 0; i < Math.Min(Math.Abs(notches), 10); i++)
+            {
+                _session.SendMouse(_ctx.LastMouseX, _ctx.LastMouseY, _buttonMask | bit);
+                _session.SendMouse(_ctx.LastMouseX, _ctx.LastMouseY, _buttonMask);
+            }
+            e.Handled = true;
+        }
+
         private static void ReleaseHeldButtons(SessionContext ctx)
         {
             if (ctx.ButtonMask != 0)
