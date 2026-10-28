@@ -172,7 +172,9 @@
                         IsChecked="True"
                         ToolTip="Reconnect the saved servers that were open as tabs when ATENtion was closed"/>
                 <Separator/>
-
+                <MenuItem Header="_User List…"
+                        Click="OnUserList"
+                        ToolTip="Show every console session the BMC currently reports"/>
                 <MenuItem Header="Session _Info…"
                         Click="OnSessionInfo"/>
             </MenuItem>

@@ -670,7 +670,58 @@ namespace ATENtion.App
                 if (s.Controlling == true) SetStatus(ctx, "● Controlling", StateGreen);
                 else SetStatus(ctx, "● View-only", StateOrange);
                 if (ReferenceEquals(ctx, _ctx)) UpdateTitle();
+                NoteSessionListChange(ctx, s);
+                NoteBmcNotice(ctx, s);
             }));
+        }
+
+        /// <summary>How long a "user connected/disconnected" notice stays in the status bar.</summary>
+        private static readonly TimeSpan SessionNoticeDuration = TimeSpan.FromSeconds(5);
+
+        // Announces users joining or leaving this tab's BMC. The first list a session receives is
+        // who was already there, ourselves included, so it is only remembered.
+        private void NoteSessionListChange(SessionContext ctx, KvmVideoSession s)
+        {
+            var list = s.Sessions;
+            if (!ReferenceEquals(ctx.SessionListOwner, s))
+            {
+                ctx.SessionListOwner = s;
+                ctx.KnownSessions = null;
+            }
+            if (ctx.KnownSessions == null)
+            {
+                if (list.Count > 0) ctx.KnownSessions = list;
+                return;
+            }
+            string notice = SessionListChanges.Notice(ctx.KnownSessions, list);
+            ctx.KnownSessions = list;
+            if (notice == null) return;
+            // Every tab shares the status bar, so name the server unless it is the only tab.
+            string text = _sessions.Count > 1 ? $"{ctx.DisplayName}: {notice}" : notice;
+            Core.Diagnostics.KvmLog.Write("Console sessions: " + text);
+            FlashStatus(text, SessionNoticeDuration);
+        }
+
+        // Reports a notice the BMC sent about this console, once per notice.
+        private void NoteBmcNotice(SessionContext ctx, KvmVideoSession s)
+        {
+            var notice = s.LastNotice;
+            if (notice == null || (ReferenceEquals(ctx.NoticeOwner, s) && ctx.ShownNotice == notice)) return;
+            ctx.NoticeOwner = s;
+            ctx.ShownNotice = notice;
+            string text;
+            switch (notice.Value)
+            {
+                case PrivilegeRecordType.SessionLimit:
+                    text = "The BMC has reached its maximum number of console sessions";
+                    SetStatus(ctx, "● Refused: session limit", StateRed);
+                    break;
+                case PrivilegeRecordType.BiosUpgrade: text = "The BMC is disconnecting consoles for a BIOS upgrade"; break;
+                case PrivilegeRecordType.FirmwareUpgrade: text = "The BMC is disconnecting consoles for a firmware upgrade"; break;
+                case PrivilegeRecordType.RaidUpgrade: text = "The BMC is disconnecting consoles for a RAID upgrade"; break;
+                default: return;   // a web logout: logged by the session, and the console carries on
+            }
+            FlashStatus(_sessions.Count > 1 ? $"{ctx.DisplayName}: {text}" : text, SessionNoticeDuration);
         }
 
         private void OnAbout(object sender, RoutedEventArgs e) =>
@@ -678,6 +729,20 @@ namespace ATENtion.App
 
         private SessionInfoWindow _sessionInfo;
 
+        /// <summary>The active session's reported console sessions, for the User List dialog.</summary>
+        internal IReadOnlyList<string> CurrentSessions => _session?.Sessions;
+
+        private UserListWindow _userList;
+
+        private void OnUserList(object sender, RoutedEventArgs e)
+        {
+            if (_userList != null) { _userList.Activate(); return; }
+            _userList = new UserListWindow(this) { Owner = this };
+            _userList.Closed += (s2, e2) => _userList = null;
+            _userList.Show();
+        }
+
+        /// <summary>Open (or focus) the live Session Info dialog.</summary>
         private void OnSessionInfo(object sender, RoutedEventArgs e)
         {
             if (_sessionInfo != null) { _sessionInfo.Activate(); return; }
