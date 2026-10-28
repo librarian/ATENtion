@@ -1284,9 +1284,14 @@ namespace ATENtion.App
         private void SendKey(KeyEventArgs e, bool down)
         {
             if (_session == null) return;
-            // WPF delivers some keys as Key.System (with e.SystemKey set), e.g. Alt-combos.
-            Key key = e.Key == Key.System ? e.SystemKey : e.Key;
-            uint keysym = KeySymMap.ToKeySym(key);
+            // WPF reports some keys under a stand-in: Alt combinations as Key.System, a dead key
+            // (the accent keys on many layouts) as DeadCharProcessed, and keys taken by an input
+            // method as ImeProcessed. The real key is in a separate property.
+            Key key = e.Key == Key.System ? e.SystemKey
+                    : e.Key == Key.DeadCharProcessed ? e.DeadCharProcessedKey
+                    : e.Key == Key.ImeProcessed ? e.ImeProcessedKey
+                    : e.Key;
+            uint keysym = KeySymFor(key);
             if (keysym != 0)
             {
                 keysym = ApplyLockKeyMarker(keysym);
@@ -1320,6 +1325,29 @@ namespace ATENtion.App
 
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         private static extern short GetKeyState(int nVirtKey);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern uint MapVirtualKeyEx(uint uCode, uint uMapType, IntPtr dwhkl);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern IntPtr GetKeyboardLayout(uint idThread);
+
+        private const uint MAPVK_VK_TO_VSC = 0;
+
+        // Layout-dependent keys go by where they are on the keyboard (see KeyPositions); the active
+        // layout says which physical key produced the virtual key. Everything else, and anything
+        // the layout cannot place, uses the fixed table.
+        private static uint KeySymFor(Key key)
+        {
+            if (KeySymMap.IsLayoutDependent(key))
+            {
+                int vk = KeyInterop.VirtualKeyFromKey(key);
+                uint scan = MapVirtualKeyEx((uint)vk, MAPVK_VK_TO_VSC, GetKeyboardLayout(0));
+                uint hid = KeyPositions.HidFromScanCode(scan);
+                if (hid != 0) return hid;
+            }
+            return KeySymMap.ToKeySym(key);
+        }
 
         private void OnRefresh(object s, RoutedEventArgs e)
         {

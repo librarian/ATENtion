@@ -25,7 +25,29 @@ namespace ATENtion.App.Tests
             Assert.Equal(expected, ConnectSettings.NormalizeHost(typed));
         }
 
+        [Theory]
+        [InlineData(0x10u, 0x14u)]   // Q
+        [InlineData(0x15u, 0x1Cu)]   // the Y position: Z on a German keyboard
+        [InlineData(0x2Cu, 0x1Du)]   // the Z position: Y on a German keyboard
+        [InlineData(0x56u, 0x64u)]   // the ISO key between left Shift and Z
+        [InlineData(0x0Bu, 0x27u)]   // 0
+        [InlineData(0x35u, 0x38u)]   // /
+        [InlineData(0x2Bu, 0x31u)]   // backslash / ISO #
+        public void A_Key_Is_Sent_By_Its_Position(uint scanCode, uint expectedHid)
+        {
+            Assert.Equal(expectedHid, KeyPositions.HidFromScanCode(scanCode));
+        }
 
+        [Theory]
+        [InlineData(0x01u)]   // Escape
+        [InlineData(0x1Cu)]   // Enter
+        [InlineData(0x39u)]   // Space
+        [InlineData(0x4Bu)]   // left arrow / keypad 4
+        [InlineData(0x1FFu)]  // out of range
+        public void Keys_That_Do_Not_Depend_On_Layout_Are_Left_To_The_Fixed_Table(uint scanCode)
+        {
+            Assert.Equal(0u, KeyPositions.HidFromScanCode(scanCode));
+        }
 
 
     }
