@@ -394,6 +394,7 @@ namespace ATENtion.App
         private void OnClosed(object sender, EventArgs e)
         {
             _statsTimer.Stop();
+            _logFlushTimer.Stop();
             _reconnectTimer.Stop();
             _flashTimer.Stop();
             try { SaveUi(); }
@@ -591,13 +592,35 @@ namespace ATENtion.App
             string exe = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;
             string path = System.IO.Path.ChangeExtension(exe, ".log");
             Core.Diagnostics.KvmLog.FilePath = path;
-            Core.Diagnostics.KvmLog.Message += line =>
-                Dispatcher.BeginInvoke(new System.Action(() =>
-                {
-                    LogBox.AppendText(line + System.Environment.NewLine);
-                    LogBox.ScrollToEnd();
-                }));
+            // Lines arrive from every session's threads, often many a second. They are queued and
+            // added to the panel in batches, rather than one dispatcher call per line.
+            Core.Diagnostics.KvmLog.Message += line => _pendingLog.Enqueue(line);
+            _logFlushTimer.Tick += (s, e) => FlushLogPanel();
+            _logFlushTimer.Start();
             Core.Diagnostics.KvmLog.Write("=== ATENtion started; log file: " + path + " ===");
+        }
+
+        private readonly System.Collections.Concurrent.ConcurrentQueue<string> _pendingLog =
+            new System.Collections.Concurrent.ConcurrentQueue<string>();
+        private readonly DispatcherTimer _logFlushTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+
+        /// <summary>Lines kept in the log panel. The file keeps everything; the panel only the recent part.</summary>
+        private const int LogPanelMaxChars = 400_000;
+
+        private void FlushLogPanel()
+        {
+            if (_pendingLog.IsEmpty) return;
+            var batch = new System.Text.StringBuilder();
+            while (batch.Length < LogPanelMaxChars && _pendingLog.TryDequeue(out string line))
+                batch.Append(line).Append(Environment.NewLine);
+            LogBox.AppendText(batch.ToString());
+            if (LogBox.Text.Length > LogPanelMaxChars)
+            {
+                string text = LogBox.Text;
+                int cut = text.IndexOf('\n', text.Length - LogPanelMaxChars / 2);
+                LogBox.Text = cut < 0 ? "" : text.Substring(cut + 1);
+            }
+            LogBox.ScrollToEnd();
         }
 
         private void OnLoaded(object sender, RoutedEventArgs e)
@@ -1452,12 +1475,7 @@ namespace ATENtion.App
         private void OnClearLog(object sender, RoutedEventArgs e)
         {
             LogBox.Clear();
-            try
-            {
-                string path = Core.Diagnostics.KvmLog.FilePath;
-                if (!string.IsNullOrEmpty(path) && System.IO.File.Exists(path)) System.IO.File.WriteAllText(path, "");
-            }
-            catch { }
+            try { Core.Diagnostics.KvmLog.Clear(); } catch { }
             FlashStatus("Log cleared.");
         }
 
