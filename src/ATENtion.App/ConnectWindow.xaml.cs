@@ -162,6 +162,19 @@ namespace ATENtion.App
         // to the executable overrides it, for a renewed certificate or a different firmware generation.
         /// <summary>Builds connection options for a saved profile without showing the dialog.</summary>
         /// <remarks>Tokens are not persisted, so a profile that does not arm via the web has none.</remarks>
+        internal static KvmConnectionOptions OptionsFor(ConnectSettings profile)
+        {
+            if (!int.TryParse(profile.Port, out int port)) port = 5900;
+            return new KvmConnectionOptions
+            {
+                Host = ConnectSettings.NormalizeHost(profile.Host),
+                Port = port,
+                Token = profile.Token ?? "",
+                UseTls = profile.Tls,
+                ClientCertificate = LoadClientCert(),
+            };
+        }
+
         // Loaded once per run. Each load with MachineKeySet writes a key file into the machine key
         // store that stays until the certificate is finalised, and connects and restored tabs each
         // loaded their own.

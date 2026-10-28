@@ -126,7 +126,11 @@
                         Header="_Auto-reconnect on drop"
                         IsCheckable="True"
                         IsChecked="True"/>
-
+                <MenuItem x:Name="ReopenTabsItem"
+                        Header="Re_open tabs on startup"
+                        IsCheckable="True"
+                        IsChecked="True"
+                        ToolTip="Reconnect the saved servers that were open as tabs when ATENtion was closed"/>
                 <Separator/>
 
                 <MenuItem Header="Session _Info…"

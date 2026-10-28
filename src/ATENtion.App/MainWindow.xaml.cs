@@ -262,6 +262,7 @@ namespace ATENtion.App
             ActualSizeItem.IsChecked = s.ActualSize;
             SmoothScalingItem.IsChecked = s.SmoothScaling; // fires OnToggleSmoothScaling
             AutoReconnectItem.IsChecked = s.AutoReconnect;
+            ReopenTabsItem.IsChecked = s.ReopenTabs;
             // Relative(2)/Single(3) are disabled (they need cursor capture the client does not do yet),
             // so always start in Absolute regardless of any stale saved value - the BMC must never be
             // sent a mode whose coordinates the client cannot produce correctly.
@@ -308,6 +309,12 @@ namespace ATENtion.App
                 EnableLogging = EnableLoggingItem.IsChecked,
                 MouseMode = (int)_mouseMode,
                 StreamAllTabs = StreamAllTabsItem.IsChecked,
+                ReopenTabs = ReopenTabsItem.IsChecked,
+                OpenProfileIds = _sessions
+                    .Select(c => c.ConnectProfile?.Id)
+                    .Where(id => !string.IsNullOrEmpty(id))
+                    .ToList(),
+                ActiveProfileId = _ctx.ConnectProfile?.Id ?? "",
             };
             // RestoreBounds is the normal-state rect in every window state (incl. maximized).
             var r = RestoreBounds;
@@ -461,7 +468,7 @@ namespace ATENtion.App
 
         private void OnLoaded(object sender, RoutedEventArgs e)
         {
-            if (!ShowConnectDialog())
+            if (!RestoreTabs() && !ShowConnectDialog())
                 ShowDemoFrame();
         }
 
@@ -1501,6 +1508,52 @@ namespace ATENtion.App
         /// Tabs whose profile has since been deleted are skipped. A profile that does not arm via the
         /// web has no persisted token, so its tab reopens without connecting and says what it needs.
         /// </remarks>
+        private bool RestoreTabs()
+        {
+            if (!ReopenTabsItem.IsChecked) return false;
+            var saved = UiSettings.Load();
+            var profiles = ConnectSettings.LoadProfiles()
+                .GroupBy(p => p.Id).ToDictionary(g => g.Key, g => g.First());
+            var wanted = saved.OpenProfileIds.Where(profiles.ContainsKey).Select(id => profiles[id]).ToList();
+            if (wanted.Count == 0) return false;
+
+            var contexts = new List<SessionContext>();
+            for (int i = 0; i < wanted.Count; i++)
+            {
+                var ctx = i == 0 ? _ctx : RegisterContext(new SessionContext
+                {
+                });
+                ctx.ConnectProfile = wanted[i];
+                ctx.ConnectOptions = ConnectWindow.OptionsFor(wanted[i]);
+                ctx.ArmViaWeb = wanted[i].Arm;
+                ctx.BmcUser = wanted[i].User;
+                ctx.BmcPassword = wanted[i].Password;
+                ctx.QuietFailures = true;
+                ctx.UpdateDisplayName();
+                contexts.Add(ctx);
+            }
+
+            // Select the visible tab before connecting, so each session starts paused or streaming
+            // according to whether it is the one on screen.
+            var active = contexts.FirstOrDefault(c => c.ConnectProfile.Id == saved.ActiveProfileId) ?? contexts[0];
+            if (!ReferenceEquals(active, _ctx)) SessionTabs.SelectedItem = active;
+
+            foreach (var ctx in contexts)
+            {
+                if (ctx.ArmViaWeb)
+                {
+                    ConnectLive(ctx, ctx.ConnectOptions, ctx.ArmViaWeb, ctx.BmcUser, ctx.BmcPassword);
+                }
+                else
+                {
+                    SetStatus(ctx, "● Disconnected", StateNeutral);
+                    ShowOverlay(ctx, "This server connects with a token, which is not saved - " +
+                                     "use Connection ▸ Connect / Change server to enter one.");
+                }
+            }
+            return true;
+        }
+
         private void ShowDemoFrame()
         {
             const int width = 256, height = 192;
