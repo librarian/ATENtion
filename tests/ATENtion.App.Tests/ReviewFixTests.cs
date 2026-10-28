@@ -49,7 +49,13 @@ namespace ATENtion.App.Tests
             Assert.Equal(0u, KeyPositions.HidFromScanCode(scanCode));
         }
 
-
+        [Fact]
+        public void Paste_Counts_What_It_Cannot_Type()
+        {
+            Assert.Equal(0, HostKeys.CountUntypable("Hello, world!\r\n"));
+            Assert.Equal(2, HostKeys.CountUntypable("café €"));
+            Assert.Equal(0, HostKeys.CountUntypable(null));
+        }
     }
 
     /// <summary>Two running copies of ATENtion sharing one settings file.</summary>
