@@ -152,6 +152,10 @@ namespace ATENtion.Core.Net
         /// Drives the stall watchdog.</summary>
         public DateTime LastMessageUtc { get; private set; }
 
+        /// <summary>Why the latest video could not be decoded, or null once a frame decodes.</summary>
+        /// <remarks>Lets the UI say why the screen stays blank instead of waiting indefinitely.</remarks>
+        public string LastDecodeError { get; private set; }
+
         /// <summary>Input-control state from the server privilege grant (msg 0x39): true = this session
         /// controls input, false = view-only, null = not yet reported. See <see cref="PrivilegeChanged"/>.</summary>
         public bool? Controlling { get; private set; }
@@ -240,6 +244,17 @@ namespace ATENtion.Core.Net
 
         // One FramebufferUpdate arrived: one request is no longer in flight. Never below zero, since
         // the BMC may send an update nobody asked for.
+        private void ReleaseOneRequest()
+        {
+            int seen;
+            do
+            {
+                seen = System.Threading.Volatile.Read(ref _outstanding);
+                if (seen <= 0) return;
+            }
+            while (System.Threading.Interlocked.CompareExchange(ref _outstanding, seen - 1, seen) != seen);
+        }
+
         /// <summary>Watchdog body (off the timer thread): probe after a soft stall, fault after a hard one.</summary>
         private void WatchdogTick()
         {
@@ -327,9 +342,11 @@ namespace ATENtion.Core.Net
             // runImage ([7,0x0780]) only ONCE at startup, not every cycle (pcap) -
             // sending it per frame was ~hundreds of extra messages and likely extra BMC frames.
             if (!incremental) System.Threading.Interlocked.Exchange(ref _ticksSinceFull, 0);
-            RequestFrame(incremental);
-            System.Threading.Interlocked.Increment(ref _outstanding); // one more request in flight
+            // Reserve before writing: a reply can be consumed before the send returns.
+            System.Threading.Interlocked.Increment(ref _outstanding);
             _lastRequestTick = Environment.TickCount;
+            try { RequestFrame(incremental); }
+            catch { ReleaseOneRequest(); throw; }
         }
 
         /// <summary>runImage ([7,0x0780]) - sent ONCE at session start (FUN_180011950). The original
@@ -394,17 +411,23 @@ namespace ATENtion.Core.Net
                     if (++count <= 20) // log the first messages to characterise the stream
                         Diagnostics.KvmLog.Write($"msg #{count}: type 0x{msg.Type:x2}{(msg.IsFrame ? " (frame)" : "")}");
                     VideoBytes += msg.PayloadBytes;
+                    // Every FramebufferUpdate answers a request, including the no-signal marker and
+                    // an empty update. Counting only decoded pictures left the no-signal replies of
+                    // a powered-down host counted as outstanding, which stalled the stream once it
+                    // came back on.
+                    if (msg.Type == RfbMessageType.FramebufferUpdate) ReleaseOneRequest();
                     if (msg.HasPrivilege && (Controlling != msg.Controlling || PrivilegeInfo != msg.PrivilegeInfo))
                     {
                         Controlling = msg.Controlling;
                         PrivilegeInfo = msg.PrivilegeInfo;
                         PrivilegeChanged?.Invoke(this, EventArgs.Empty);
                     }
+                    if (msg.IsFrame) LastDecodeError = null;
+                    else if (msg.DecodeError != null) LastDecodeError = msg.DecodeError;
                     if (msg.IsFrame)
                     {
                         FramesDecoded++;
                         LastFrameUtc = DateTime.UtcNow;
-                        System.Threading.Interlocked.Decrement(ref _outstanding);
                         FrameDecoded?.Invoke(this, new FrameDecodedEventArgs(Decoder.Frame, msg.Dirty));
                         if (msg.Resized)
                         {

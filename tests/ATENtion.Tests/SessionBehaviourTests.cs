@@ -13,7 +13,38 @@ namespace ATENtion.Tests
     /// <summary>Session behaviour against a loopback BMC: request accounting, the user list, and failures.</summary>
     public class SessionBehaviourTests
     {
+        [Fact]
+        public void Video_Runs_Freely_Once_A_Host_Comes_On()
+        {
+            // While the host is off, every request is answered with the no-signal marker. Those
+            // replies used to stay counted as outstanding, so once pictures came back the session
+            // only sent the periodic full request: about one frame a second here instead of a stream.
+            using (var bmc = new FakeBmc())
+            using (var session = Open(bmc, s => s.FullRefreshIntervalTicks = 1))
+            {
+                Thread.Sleep(4000);
+                bmc.HostOn = true;
+                Thread.Sleep(300);
+                long before = session.FramesDecoded;
+                Thread.Sleep(2000);
+                long frames = session.FramesDecoded - before;
+                // Hundreds on loopback; the bug gave about two. Low enough for a slow CI runner.
+                Assert.True(frames > 20, $"only {frames} frames in 2s after the host came on");
+            }
+        }
 
+        [Fact]
+        public void No_Signal_Replies_Do_Not_Loop_Requests()
+        {
+            // Topping the pipeline up after a no-signal reply would request and reply as fast as the
+            // link allows while the host is off. Requests stay at the timer's pace instead.
+            using (var bmc = new FakeBmc())
+            using (var session = Open(bmc, s => s.FullRefreshIntervalTicks = 1))
+            {
+                Thread.Sleep(3000);
+                Assert.True(bmc.Requests < 20, $"{bmc.Requests} requests in 3s with the host off");
+            }
+        }
 
 
         [Fact]
@@ -49,6 +80,25 @@ namespace ATENtion.Tests
         }
 
 
+        [Fact]
+        public void A_Rectangle_That_Cannot_Be_Decoded_Is_Skipped_And_Reported()
+        {
+            using (var bmc = new FakeBmc())
+            using (var faulted = new ManualResetEventSlim())
+            using (var session = Open(bmc))
+            {
+                session.Faulted += (s, e) => faulted.Set();
+                WaitFor(() => bmc.Requests > 0);
+                // An ASPEED rectangle with an unknown stream marker.
+                bmc.Push(FakeBmc.Update(0x57, new byte[] { 0, 0, 0x12, 0x34, 0, 0, 0, 0, 0, 0, 0, 0 }));
+                Assert.True(WaitFor(() => session.LastDecodeError != null), "no decode error recorded");
+                Assert.False(faulted.IsSet, "a bad rectangle ended the session");
+
+                bmc.HostOn = true;          // a good frame clears it
+                session.RequestFullRefresh();
+                Assert.True(WaitFor(() => session.LastDecodeError == null));
+            }
+        }
 
         private static KvmVideoSession Open(FakeBmc bmc, Action<KvmVideoSession> configure = null)
         {
