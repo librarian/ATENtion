@@ -79,6 +79,19 @@ namespace ATENtion.Tests
             session.Dispose();
         }
 
+        [Fact]
+        public void Manual_Refresh_Is_Sent_By_The_Input_Thread()
+        {
+            using (var bmc = new FakeBmc())
+            using (var session = Open(bmc, s => { s.VideoPaused = true; s.PausedCheckSeconds = 0; }))
+            {
+                WaitFor(() => bmc.FullRequests >= 1);   // the startup keyframe
+                Thread.Sleep(300);
+                int before = bmc.FullRequests;
+                session.RequestFullRefresh();
+                Assert.True(WaitFor(() => bmc.FullRequests == before + 1));
+            }
+        }
 
         [Fact]
         public void A_Rectangle_That_Cannot_Be_Decoded_Is_Skipped_And_Reported()
@@ -136,5 +149,50 @@ namespace ATENtion.Tests
 namespace ATENtion.Tests
 {
     /// <summary>What switching tabs relies on: MainWindow.SwitchTo releases held input on the tab being left.</summary>
+    public class TabSwitchRegressionTests
+    {
+        [Fact]
+        public void Releasing_Held_Input_Sends_An_Up_For_Every_Key_Still_Down()
+        {
+            // Hold Shift and A on one tab, switch away: both must come up on that host, not later on
+            // whichever tab is visible when the keys are physically released.
+            using (var bmc = new FakeBmc())
+            using (var session = Open(bmc))
+            {
+                session.SendKey(0xE1, true);     // left Shift
+                session.SendKey(0x04, true);     // A
+                session.SendKey(0x05, true);     // B, released normally
+                session.SendKey(0x05, false);
+                session.ReleaseHeldKeys();
+                Assert.True(Wait(() => bmc.Keys.Count == 6), $"{bmc.Keys.Count} key events");
+                var ups = bmc.Keys.Skip(4).ToList();
+                Assert.All(ups, k => Assert.False(k.Down));
+                Assert.Equal(new uint[] { 0x04, 0xE1 }, ups.Select(k => k.Usage).OrderBy(u => u).ToArray());
 
+                session.ReleaseHeldKeys();       // nothing left held: nothing more sent
+                Thread.Sleep(300);
+                Assert.Equal(6, bmc.Keys.Count);
+            }
+        }
+
+        private static KvmVideoSession Open(FakeBmc bmc, Action<KvmVideoSession> configure = null)
+        {
+            var session = new KvmVideoSession(bmc.Options()) { LogInput = false };
+            configure?.Invoke(session);
+            session.Open();
+            session.StartPump();
+            return session;
+        }
+
+        private static bool Wait(Func<bool> condition, int timeoutMs = 3000)
+        {
+            var clock = Stopwatch.StartNew();
+            while (clock.ElapsedMilliseconds < timeoutMs)
+            {
+                if (condition()) return true;
+                Thread.Sleep(20);
+            }
+            return condition();
+        }
+    }
 }

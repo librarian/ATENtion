@@ -127,6 +127,49 @@ namespace ATENtion.Core.Net
         /// retained only as an explicit compatibility/performance experiment.</summary>
         public int PipelineDepth { get; set; } = 1;
 
+        /// <summary>
+        /// Stop streaming video while keeping the session, its keepalive and any mounted media up.
+        /// </summary>
+        /// <remarks>
+        /// Used for tabs that are not visible. A paused session still asks for one full frame every
+        /// <see cref="PausedCheckSeconds"/>, which keeps <see cref="VideoSignal"/> current and lets
+        /// the watchdog notice a dead link.
+        /// </remarks>
+        public bool VideoPaused
+        {
+            get => _videoPaused;
+            set
+            {
+                if (_videoPaused == value) return;
+                System.Threading.Interlocked.Exchange(ref _pausedTicks, 0);
+                _videoPaused = value;
+                if (!value) ResumeVideo();
+            }
+        }
+        private volatile bool _videoPaused;
+        private int _pausedTicks;
+
+        /// <summary>Seconds between the single full-frame checks a paused session makes. 0 stops them.</summary>
+        /// <remarks>
+        /// A full request is always answered, with a picture or with the no-signal marker, so each
+        /// check refreshes <see cref="VideoSignal"/>. The cost is one full frame per check: about
+        /// 70 KB on ASPEED boards, but about 1.5 MB on Hermon (X9) boards, which send them raw.
+        /// </remarks>
+        public int PausedCheckSeconds { get; set; } = 10;
+
+        // Re-arm after a pause: the watchdog's clock has to be reset before requests resume, or the
+        // silence accumulated while paused counts against it. A full frame repaints the surface,
+        // which is needed anyway since nothing was decoded while hidden.
+        private void ResumeVideo()
+        {
+            if (!_running) return;
+            LastMessageUtc = DateTime.UtcNow;
+            System.Threading.Interlocked.Exchange(ref _probedThisStall, 0);
+            System.Threading.Volatile.Write(ref _outstanding, 0);
+            try { SendUpdate(incremental: false); }
+            catch (Exception ex) { OnSendFault(ex); }
+        }
+
         /// <summary>FBURs sent but not yet answered by a FramebufferUpdate. Held ~= PipelineDepth;
         /// drives the steady-state top-up and the timer's liveness watchdog.</summary>
         private int _outstanding;
@@ -206,6 +249,16 @@ namespace ATENtion.Core.Net
                 try
                 {
                     if (!_running) return;
+                    if (_videoPaused)
+                    {
+                        // A BMC that answers the host-status query is checked with it: four bytes
+                        // back instead of a full frame. Others still get the full frame.
+                        if (PausedCheckDue())
+                        {
+                            SendUpdate(incremental: false);
+                        }
+                        return;
+                    }
                     int t = System.Threading.Interlocked.Increment(ref _ticksSinceFull);
                     if (FullRefreshIntervalTicks > 0 && t >= FullRefreshIntervalTicks)
                         SendUpdate(incremental: false);                       // periodic forced full repairs any delta drift
@@ -232,10 +285,42 @@ namespace ATENtion.Core.Net
             _watchdogTimer = new Timer(_ => { try { WatchdogTick(); } catch (Exception ex) { Diagnostics.KvmLog.Error("watchdog", ex); } }, null, 2000, 2000);
         }
 
+        // One tick of the paused request timer: true when a check is due.
+        private bool PausedCheckDue()
+        {
+            int every = PausedCheckSeconds;
+            if (every <= 0) return false;
+            if (System.Threading.Interlocked.Increment(ref _pausedTicks) < every) return false;
+            System.Threading.Interlocked.Exchange(ref _pausedTicks, 0);
+            return true;
+        }
+
+        /// <summary>What the watchdog should do after a given silence.</summary>
+        internal enum StallAction { None, Probe, Fault }
+
+        /// <summary>The watchdog's decision, kept separate from the timer so it can be tested.</summary>
+        /// <remarks>
+        /// While paused the only traffic expected is the reply to each check, so the fault threshold
+        /// is extended by one check interval and there is no separate probe: the next check is one.
+        /// With checks turned off a paused session expects nothing, and silence proves nothing.
+        /// </remarks>
+        internal static StallAction EvaluateStall(double idleSeconds, bool paused, int pausedCheckSeconds,
+                                                  int probeSeconds, int timeoutSeconds)
+        {
+            if (paused)
+            {
+                if (pausedCheckSeconds <= 0 || timeoutSeconds <= 0) return StallAction.None;
+                return idleSeconds >= pausedCheckSeconds + timeoutSeconds ? StallAction.Fault : StallAction.None;
+            }
+            if (timeoutSeconds > 0 && idleSeconds >= timeoutSeconds) return StallAction.Fault;
+            if (probeSeconds > 0 && idleSeconds >= probeSeconds) return StallAction.Probe;
+            return StallAction.None;
+        }
+
         // Keeps PipelineDepth requests in flight, no faster than MinFrameIntervalMs allows.
         private void TopUp()
         {
-            while (_running &&
+            while (_running && !_videoPaused &&
                    System.Threading.Volatile.Read(ref _outstanding) < PipelineDepth)
             {
                 SendUpdate(incremental: true);
@@ -260,9 +345,10 @@ namespace ATENtion.Core.Net
         {
             if (!_running) return;
             double idle = (DateTime.UtcNow - LastMessageUtc).TotalSeconds;
+            var action = EvaluateStall(idle, _videoPaused, PausedCheckSeconds, StallProbeSeconds, StallTimeoutSeconds);
 
             // Hard stall: even a forced-full probe went unanswered -> declare the link dead.
-            if (StallTimeoutSeconds > 0 && idle >= StallTimeoutSeconds)
+            if (action == StallAction.Fault)
             {
                 RaiseFault(new System.IO.IOException(
                     $"No video/response from BMC for {(int)idle}s - connection stalled."));
@@ -272,7 +358,7 @@ namespace ATENtion.Core.Net
             // Soft stall: nudge the BMC with one forced-full FBUR. A live BMC always answers (even
             // on a static screen), which refreshes LastMessageUtc and re-primes a stuck pipeline; a
             // dead one stays silent until the hard-stall fault above. One probe per stall window.
-            if (StallProbeSeconds > 0 && idle >= StallProbeSeconds)
+            if (action == StallAction.Probe)
             {
                 if (System.Threading.Interlocked.Exchange(ref _probedThisStall, 1) == 0)
                 {
