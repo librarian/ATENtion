@@ -248,3 +248,20 @@ The same companion can mount an ISO for unattended diagnostics:
 
 It reports the number of SCSI commands and bytes served. The timeout or Ctrl+C performs
 a clean virtual-media detach.
+
+## CI and platform releases
+
+Normal pull-request and `main` CI builds Windows and Linux only. To request macOS
+checks, use **Actions → macOS CI → Run workflow** and enter a branch, commit, tag,
+or `refs/pull/NUMBER/head`. Contributors without workflow-run permission can ask
+a maintainer to run it for their PR. These checks use a read-only repository token.
+
+Version tags publish Windows/Linux assets through **Release**. After that succeeds,
+**macOS Release** builds Intel and ARM assets separately and attaches each successful
+archive to the existing release. A queued or failed Mac runner does not block the
+Windows/Linux release or the other Mac architecture.
+
+To retry macOS packaging for an existing release, use **Actions → macOS Release →
+Run workflow** and enter its version tag. You can also rerun failed jobs in its
+existing run. Existing assets for that architecture are replaced on success.
+The new manual workflows become available after these files land on `main`.
