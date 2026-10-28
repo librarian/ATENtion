@@ -149,6 +149,8 @@ namespace ATENtion.App
             {
                 // Inherit from the tab this was opened from rather than resetting to the defaults.
                 FullFrameInterval = _ctx.FullFrameInterval,
+                ImageMode = _ctx.ImageMode,
+                ImageQuality = _ctx.ImageQuality,
             });
             SessionTabs.SelectedItem = ctx;           // raises OnSessionTabChanged, which swaps _ctx
             ShowConnectDialog();
@@ -211,6 +213,7 @@ namespace ATENtion.App
             RefreshStorageMenu(ctx);
             // Re-tick for the tab being shown. Sync only - it already has these values.
             SyncFullRefreshMenu();
+            SyncDisplayPreferenceMenu();
             RepaintActive();
             UpdateTitle();
         }
@@ -322,6 +325,8 @@ namespace ATENtion.App
                     next = RegisterContext(new SessionContext
                     {
                         FullFrameInterval = ctx.FullFrameInterval,
+                        ImageMode = ctx.ImageMode,
+                        ImageQuality = ctx.ImageQuality,
                     });
                 }
                 else
@@ -366,6 +371,11 @@ namespace ATENtion.App
             UpdateMouseModeMenu();
             _fullFrameInterval = s.FullFrameIntervalSeconds;
             ApplyFullRefreshInterval();
+            _imageMode = s.ImageMode == ScreenInfoRequest.NormalMode
+                ? ScreenInfoRequest.NormalMode : ScreenInfoRequest.EnhancedTextMode;
+            _imageQuality = s.ImageQuality > ScreenInfoRequest.MaximumQuality
+                ? ScreenInfoRequest.MaximumQuality : (byte)s.ImageQuality;
+            ApplyDisplayPreference();
             StreamAllTabsItem.IsChecked = s.StreamAllTabs;
             ApplyTabStreaming();
             OnToggleLog(null, null);
@@ -407,6 +417,8 @@ namespace ATENtion.App
                 EnableLogging = EnableLoggingItem.IsChecked,
                 MouseMode = (int)_mouseMode,
                 FullFrameIntervalSeconds = _fullFrameInterval,
+                ImageMode = _imageMode,
+                ImageQuality = _imageQuality,
                 StreamAllTabs = StreamAllTabsItem.IsChecked,
                 ReopenTabs = ReopenTabsItem.IsChecked,
                 OpenProfileIds = _sessions
@@ -825,6 +837,8 @@ namespace ATENtion.App
                         MouseMode = (byte)_mouseMode, // enum value == on-wire mode byte
                         // From ctx, not the forwarding properties: this runs on a background task
                         // and may be a tab that is not the visible one.
+                        ImageQuality = ctx.ImageQuality, // View > Display preference
+                        ImageMode = ctx.ImageMode,
                         // View > Full frame requests. Continuous (-1) asks for every frame in full.
                         AlwaysRequestFullFrames = ctx.FullFrameInterval == ContinuousRefresh,
                         // 1, not 0, in continuous: see ApplyFullRefreshInterval.
@@ -1344,6 +1358,69 @@ namespace ATENtion.App
             session.FullRefreshIntervalTicks = continuous ? 1 : _fullFrameInterval;
         }
 
+        // Display preference. Both values go to the BMC in one changeScreenInfo (0x32); the session
+        // keeps them so a reconnect re-sends the same choice.
+        private ushort _imageMode { get => _ctx.ImageMode; set => _ctx.ImageMode = value; }
+        private byte _imageQuality { get => _ctx.ImageQuality; set => _ctx.ImageQuality = value; }
+
+        private IEnumerable<KeyValuePair<ushort, MenuItem>> ImageModeItems()
+        {
+            yield return new KeyValuePair<ushort, MenuItem>(ScreenInfoRequest.EnhancedTextMode, Mode444Item);
+            yield return new KeyValuePair<ushort, MenuItem>(ScreenInfoRequest.NormalMode, Mode422Item);
+        }
+
+        private IEnumerable<KeyValuePair<byte, MenuItem>> ImageQualityItems()
+        {
+            yield return new KeyValuePair<byte, MenuItem>(11, Quality11Item);
+            yield return new KeyValuePair<byte, MenuItem>(9, Quality9Item);
+            yield return new KeyValuePair<byte, MenuItem>(6, Quality6Item);
+            yield return new KeyValuePair<byte, MenuItem>(3, Quality3Item);
+            yield return new KeyValuePair<byte, MenuItem>(0, Quality0Item);
+        }
+
+        private void OnImageMode(object sender, RoutedEventArgs e)
+        {
+            var item = sender as MenuItem;
+            ushort mode;
+            if (item == null || !ushort.TryParse(item.Tag as string, out mode)) return;
+            _imageMode = mode;
+            ApplyDisplayPreference();
+            FlashStatus(mode == ScreenInfoRequest.EnhancedTextMode
+                ? "Compression: Enhanced text (4:4:4)."
+                : "Compression: Normal (4:2:2) - may return stale frames on ATEN/ASPEED firmware.");
+        }
+
+        private void OnImageQuality(object sender, RoutedEventArgs e)
+        {
+            var item = sender as MenuItem;
+            byte quality;
+            if (item == null || !byte.TryParse(item.Tag as string, out quality)) return;
+            _imageQuality = quality;
+            ApplyDisplayPreference();
+            FlashStatus($"Image quality: {quality}/11.");
+        }
+
+        /// <summary>Ticks the menu entries matching the visible tab, without touching the session.</summary>
+        private void SyncDisplayPreferenceMenu()
+        {
+            foreach (var entry in ImageModeItems())
+                if (entry.Value != null) entry.Value.IsChecked = entry.Key == _imageMode;
+            foreach (var entry in ImageQualityItems())
+                if (entry.Value != null) entry.Value.IsChecked = entry.Key == _imageQuality;
+        }
+
+        private void ApplyDisplayPreference()
+        {
+            SyncDisplayPreferenceMenu();
+
+            var session = _session;
+            if (session == null) return;
+            session.ImageQuality = _imageQuality;   // remembered for the next (re)connect
+            session.ImageMode = _imageMode;
+            try { session.SendScreenInfo(_imageQuality, _imageMode); }   // and applied now
+            catch (Exception ex) { Core.Diagnostics.KvmLog.Error("changing display preference", ex); }
+        }
+
         private void OnToggleSmoothScaling(object sender, RoutedEventArgs e)
         {
             if (VideoImage == null) return;
@@ -1691,6 +1768,8 @@ namespace ATENtion.App
                 var ctx = i == 0 ? _ctx : RegisterContext(new SessionContext
                 {
                     FullFrameInterval = _ctx.FullFrameInterval,
+                    ImageMode = _ctx.ImageMode,
+                    ImageQuality = _ctx.ImageQuality,
                 });
                 ctx.ConnectProfile = wanted[i];
                 ctx.ConnectOptions = ConnectWindow.OptionsFor(wanted[i]);

@@ -44,7 +44,9 @@ namespace ATENtion.App
         /// <summary>Seconds between full frame requests; 0 sends incremental requests only, -1 asks every frame.</summary>
         public int FullFrameIntervalSeconds = 5;
         /// <summary>ATEN chroma mode: 444 Enhanced Text (default) or 422 Normal.</summary>
+        public int ImageMode = 444;
         /// <summary>ATEN image quality level, 0 through 11 (default 11).</summary>
+        public int ImageQuality = 11;
         /// <summary>True to let tabs that are not visible keep requesting video.</summary>
         public bool StreamAllTabs;
         /// <summary>Most frames a second a tab asks for; 0 for no limit.</summary>
@@ -74,6 +76,8 @@ namespace ATENtion.App
                 EnableLogging = st.EnableLogging,
                 MouseMode = st.MouseMode,
                 FullFrameIntervalSeconds = st.FullFrameIntervalSeconds,
+                ImageMode = st.ImageMode,
+                ImageQuality = st.ImageQuality,
                 StreamAllTabs = st.StreamAllTabs,
                 ReopenTabs = st.ReopenTabs,
                 OpenProfileIds = new System.Collections.Generic.List<string>(st.OpenProfileIds),
@@ -97,6 +101,8 @@ namespace ATENtion.App
             st.EnableLogging = EnableLogging;
             st.MouseMode = MouseMode;
             st.FullFrameIntervalSeconds = FullFrameIntervalSeconds;
+            st.ImageMode = ImageMode;
+            st.ImageQuality = ImageQuality;
             st.StreamAllTabs = StreamAllTabs;
             st.ReopenTabs = ReopenTabs;
             st.OpenProfileIds.Clear();

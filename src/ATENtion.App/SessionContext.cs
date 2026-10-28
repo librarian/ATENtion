@@ -99,6 +99,8 @@ namespace ATENtion.App
         // Per session, not per window: each tab may be a different server on a different link, so
         // the bandwidth trade belongs to the connection.
         public int FullFrameInterval = 5;
+        public ushort ImageMode = ATENtion.Core.Protocol.ScreenInfoRequest.EnhancedTextMode;
+        public byte ImageQuality = ATENtion.Core.Protocol.ScreenInfoRequest.MaximumQuality;
 
         // Throughput bookkeeping for the status line.
         public long LastFrames, LastBytes, LastFps, LastRateBytes;
