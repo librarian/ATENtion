@@ -724,6 +724,45 @@ namespace ATENtion.App
             FlashStatus(_sessions.Count > 1 ? $"{ctx.DisplayName}: {text}" : text, SessionNoticeDuration);
         }
 
+        // ---- virtual media state ----
+
+        // Asks the visible tab's BMC which virtual-media slots are in use, when the Storage menu opens.
+        private async void OnStorageMenuOpened(object sender, RoutedEventArgs e)
+        {
+            var ctx = _ctx;
+            RefreshStorageMenu(ctx);
+            var options = ctx.ConnectOptions;
+            if (ctx.Vmedia != null)
+            {
+                VmediaStateItem.Header = "Virtual media: this tab has " + System.IO.Path.GetFileName(ctx.Vmedia.ImagePath) + " mounted";
+                return;
+            }
+            if (ctx.Session == null || options == null || !options.VirtualMediaEnabled)
+            {
+                VmediaStateItem.Header = ctx.Session == null ? "Virtual media: not connected" : "Virtual media: not offered by this BMC";
+                return;
+            }
+            VmediaStateItem.Header = "Virtual media: checking...";
+            var probe = new VirtualMediaOptions
+            {
+                Host = options.Host,
+                Port = options.VirtualMediaPort,
+                UseTls = options.VirtualMediaUseTls,
+                ClientCertificate = options.ClientCertificate,
+                ConnectTimeoutMs = 5000,
+            };
+            Core.Storage.VirtualMediaSlots slots = null;
+            try { slots = await Task.Run(() => VirtualMediaSession.ProbeSlots(probe)); }
+            catch (Exception ex) { Core.Diagnostics.KvmLog.Error("virtual media status", ex); }
+            if (!ReferenceEquals(ctx, _ctx) || ctx.Vmedia != null || ctx.Mounting) return;   // moved on meanwhile
+            bool taken = slots?.InUse(Core.Storage.VirtualMediaSlots.OwnSlot) == true;
+            VmediaStateItem.Header = slots == null ? "Virtual media: status unavailable"
+                : taken ? "Virtual media: another session has a disc mounted"
+                : slots.AnyInUse ? "Virtual media: another session has a device attached; a mount may be refused"
+                : "Virtual media: free";
+            if (taken) MountIsoItem.IsEnabled = false;
+        }
+
         private void OnAbout(object sender, RoutedEventArgs e) =>
             new AboutWindow { Owner = this }.ShowDialog();
 
@@ -1719,7 +1758,9 @@ namespace ATENtion.App
             {
                 SessionContext.DisposeInBackground(vm);
                 RefreshStorageMenu(owner);
-                if (failure != null && ReferenceEquals(owner, _ctx))
+                if (failure is Core.Storage.VirtualMediaRefusedException && ReferenceEquals(owner, _ctx))
+                    MessageBox.Show(this, failure.Message, "Can't mount " + name, MessageBoxButton.OK, MessageBoxImage.Information);
+                else if (failure != null && ReferenceEquals(owner, _ctx))
                     FlashStatus("Mount failed: " + failure.Message);
                 return;
             }

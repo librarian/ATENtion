@@ -111,3 +111,45 @@ namespace ATENtion.Tests
         }
     }
 }
+
+namespace ATENtion.Tests
+{
+    /// <summary>The BMC's virtual-media slot report, as read from health replies seen on an X10 board.</summary>
+    public class VirtualMediaSlotTests
+    {
+        [Fact]
+        public void Nothing_Mounted()
+        {
+            var slots = ATENtion.Core.Storage.VirtualMediaSlots.Parse(new byte[] { 0x03, 0xff, 0xff, 0xff });
+            Assert.Equal(3, slots.Count);
+            Assert.False(slots.AnyInUse);
+            Assert.False(slots.InUse(ATENtion.Core.Storage.VirtualMediaSlots.OwnSlot));
+        }
+
+        [Fact]
+        public void Another_Session_Has_The_CD()
+        {
+            var slots = ATENtion.Core.Storage.VirtualMediaSlots.Parse(new byte[] { 0x03, 0xff, 0x03, 0xff });
+            Assert.True(slots.InUse(2));
+            Assert.False(slots.InUse(1));
+            Assert.True(slots.AnyInUse);
+        }
+
+        [Theory]
+        [InlineData(new byte[0])]
+        [InlineData(new byte[] { 0x03, 0xff })]
+        [InlineData(new byte[] { 0x00 })]
+        public void A_Malformed_Reply_Is_Not_Read(byte[] payload)
+        {
+            Assert.Null(ATENtion.Core.Storage.VirtualMediaSlots.Parse(payload));
+        }
+
+        [Fact]
+        public void Out_Of_Range_Slots_Are_Not_In_Use()
+        {
+            var slots = ATENtion.Core.Storage.VirtualMediaSlots.Parse(new byte[] { 0x03, 0x03, 0x03, 0x03 });
+            Assert.False(slots.InUse(0));
+            Assert.False(slots.InUse(4));
+        }
+    }
+}

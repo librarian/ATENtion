@@ -141,6 +141,16 @@ namespace ATENtion.Core.Net
         /// One health exchange on its own connection, the same the attach starts with. Needs no
         /// credentials. Returns null if the reply has an unexpected shape.
         /// </remarks>
+        public static VirtualMediaSlots ProbeSlots(VirtualMediaOptions options)
+        {
+            var probe = new VirtualMediaSession(options);
+            using (Channel health = probe.OpenChannel("status"))
+            {
+                SendControl(health.Stream, 8);
+                return VirtualMediaSlots.Parse(ReadControl(health.Stream, 9));
+            }
+        }
+
         private Channel OpenChannel(string purpose)
         {
             KvmLog.Write($"vmedia: opening {purpose} channel to {_options.Host}:{_options.Port} " +
@@ -184,6 +194,9 @@ namespace ATENtion.Core.Net
                 SendControl(health.Stream, 8);
                 byte[] initialHealth = ReadControl(health.Stream, 9);
                 KvmLog.Write("vmedia: health exchange accepted: " + KvmLog.Hex(initialHealth));
+                // Refuse before attaching rather than let the BMC turn the attach down.
+                if (VirtualMediaSlots.Parse(initialHealth)?.InUse(VirtualMediaSlots.OwnSlot) == true)
+                    throw VirtualMediaRefusedException.SlotTaken();
             }
 
             using (Channel initialization = OpenChannel("initialization"))
@@ -210,9 +223,7 @@ namespace ATENtion.Core.Net
             byte[] mountStatus = ReadControl(_stream, 2);
             KvmLog.Write("vmedia: mount status: " + KvmLog.Hex(mountStatus));
             if (mountStatus.Length < 1 || mountStatus[0] != 0)
-                throw new InvalidDataException(
-                    $"BMC rejected the virtual-media attach with status " +
-                    $"{(mountStatus.Length == 0 ? -1 : mountStatus[0])}.");
+                throw VirtualMediaRefusedException.ForStatus(mountStatus.Length == 0 ? -1 : mountStatus[0]);
             KvmLog.Write("vmedia: authenticated device record accepted.");
 
             // Native device-worker acknowledgement for all three virtual USB slots.
