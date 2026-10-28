@@ -50,6 +50,7 @@ namespace ATENtion.App
         /// <summary>True to let tabs that are not visible keep requesting video.</summary>
         public bool StreamAllTabs;
         /// <summary>Most frames a second a tab asks for; 0 for no limit.</summary>
+        public int FrameRateLimit;
         /// <summary>True to reopen the tabs that were open at exit.</summary>
         public bool ReopenTabs = true;
         /// <summary>Profile ids of the tabs open at exit, in tab order.</summary>
@@ -79,6 +80,7 @@ namespace ATENtion.App
                 ImageMode = st.ImageMode,
                 ImageQuality = st.ImageQuality,
                 StreamAllTabs = st.StreamAllTabs,
+                FrameRateLimit = st.FrameRateLimit,
                 ReopenTabs = st.ReopenTabs,
                 OpenProfileIds = new System.Collections.Generic.List<string>(st.OpenProfileIds),
                 ActiveProfileId = st.ActiveProfileId,
@@ -104,6 +106,7 @@ namespace ATENtion.App
             st.ImageMode = ImageMode;
             st.ImageQuality = ImageQuality;
             st.StreamAllTabs = StreamAllTabs;
+            st.FrameRateLimit = FrameRateLimit;
             st.ReopenTabs = ReopenTabs;
             st.OpenProfileIds.Clear();
             if (OpenProfileIds != null) st.OpenProfileIds.AddRange(OpenProfileIds);

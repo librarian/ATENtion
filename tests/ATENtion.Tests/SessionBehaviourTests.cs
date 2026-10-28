@@ -305,6 +305,20 @@ namespace ATENtion.Tests
             }
         }
 
+        [Fact]
+        public void The_Frame_Rate_Limit_Is_Honoured()
+        {
+            using (var bmc = new FakeBmc { HostOn = true })
+            using (var session = Open(bmc, s => s.MinFrameIntervalMs = 100))
+            {
+                Thread.Sleep(500);
+                long before = session.FramesDecoded;
+                Thread.Sleep(2000);
+                long frames = session.FramesDecoded - before;
+                // About 20 at 10 per second; unlimited is hundreds. The floor only proves frames flow.
+                Assert.InRange(frames, 4, 30);
+            }
+        }
 
         private static KvmVideoSession Open(FakeBmc bmc, Action<KvmVideoSession> configure = null)
         {
