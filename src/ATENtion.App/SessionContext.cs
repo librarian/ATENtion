@@ -217,8 +217,38 @@ namespace ATENtion.App
 
             var session = Session;
             Session = null;
-            DisposeInBackground(session);
+            EndSession(session, WebLogin);
+            WebLogin = null;
             LiveConnected = false;
+        }
+
+        /// <summary>The BMC web login that armed <see cref="Session"/>, or null for a manual token.</summary>
+        internal ArmingResult WebLogin;
+
+        /// <summary>Closes a console session, then the web login that armed it, off the UI thread.</summary>
+        /// <remarks>
+        /// The BMC ties a console to the web login that armed it: logging out tells it the console
+        /// has ended, and the vendor viewer closes when told so. The login is therefore kept for as
+        /// long as the console runs and closed afterwards, so reconnects do not leave web sessions
+        /// behind. A mounted disc is unaffected: tested on an X10 board, it kept serving after the
+        /// login that armed it was logged out.
+        /// </remarks>
+        internal static void EndSession(KvmVideoSession session, ArmingResult login)
+        {
+            if (session == null && login == null) return;
+            DisposeInBackground(new Ending(session, login));
+        }
+
+        private sealed class Ending : IDisposable
+        {
+            private readonly KvmVideoSession _session;
+            private readonly ArmingResult _login;
+            public Ending(KvmVideoSession session, ArmingResult login) { _session = session; _login = login; }
+            public void Dispose()
+            {
+                try { _session?.Dispose(); } catch { }
+                BmcArmingClient.Logout(_login);
+            }
         }
 
         // Every session disposal still running, so the window can wait for them briefly on exit.

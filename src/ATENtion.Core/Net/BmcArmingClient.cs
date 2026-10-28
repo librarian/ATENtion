@@ -75,6 +75,8 @@ namespace ATENtion.Core.Net
         public System.Collections.Generic.List<string> Arguments { get; set; }
 
         // The web session that issued these credentials, kept so it can be closed afterwards.
+        internal string WebBaseUrl { get; set; }
+        internal CookieContainer WebCookies { get; set; }
 
         /// <summary>
         /// The port to connect to, mirroring the original: the server TLS port (argument 9) when
@@ -169,6 +171,8 @@ namespace ATENtion.Core.Net
 
             var result = ParseJnlp(jnlp);
             ValidateArmingResult(result);
+            result.WebBaseUrl = baseUrl;
+            result.WebCookies = cookies;
             if (result.Arguments != null)
                 for (int i = 0; i < result.Arguments.Count; i++)
                 {
@@ -221,6 +225,18 @@ namespace ATENtion.Core.Net
         /// sends the console a "web logout" notice and drops it from the session list, which the
         /// vendor viewer answers by closing. A mounted disc is unaffected.
         /// </remarks>
+        public static void Logout(ArmingResult result)
+        {
+            if (result?.WebCookies == null) return;
+            try
+            {
+                Get(result.WebBaseUrl + "/cgi/logout.cgi", result.WebCookies, result.WebBaseUrl);
+                result.WebCookies = null;
+                KvmLog.Write("Arming: web session logged out.");
+            }
+            catch (Exception ex) { KvmLog.Error("web logout (continuing)", ex); }
+        }
+
         // Scrapes the CSRF token from the top menu and posts op.cgi to set ikvm_setting=0 (the Java
         // plug-in). Best-effort: failures are logged and ignored, since some firmware needs no switch.
         private void TrySwitchToJavaInterface(string baseUrl, CookieContainer cookies)
