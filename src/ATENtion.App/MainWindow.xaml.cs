@@ -1181,6 +1181,7 @@ namespace ATENtion.App
         {
             // An update that changed nothing: most replies on a still screen. Copying and presenting
             // them would redraw the same picture many times a second.
+            if (e.Dirty != null && e.Dirty.Count == 0) return;
             var f = e.Frame;
             lock (ctx.PresentLock)
             {
@@ -1193,7 +1194,7 @@ namespace ATENtion.App
                 }
                 // Full copy on resize / keyframe / whole-screen update / too many changed tiles;
                 // otherwise copy just the changed tiles and remember them for a partial blit.
-                bool full = sizeChanged || e.Dirty == null || e.Dirty.Count == 0 || IsFullScreen(e.Dirty)
+                bool full = sizeChanged || e.Dirty == null || IsFullScreen(e.Dirty)
                             || ctx.PresentFull || ctx.PresentDirty.Count + e.Dirty.Count > MaxDirtyRegions;
                 if (full)
                 {
