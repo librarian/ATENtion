@@ -1,3 +1,5 @@
+Development will continue in https://github.com/librarian/qatention
+
 # ATENtion
 
 A native Windows console (KVM-over-IP) viewer and cross-platform diagnostic CLI for
